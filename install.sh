@@ -150,28 +150,46 @@ echo -e "Feeder Listen  : ${GREEN}${CLIENT_IP}:${CLIENT_PORT}/tcp${NC}"
 echo -e "SBS Listen     : ${GREEN}${SBS_IP}:${SBS_PORT}/tcp${NC}"
 echo -e "Data Directory : ${GREEN}${WORKDIR}${NC}"
 
-# 7. Manual Firewall Guidance
-echo -e "\n${YELLOW}${BOLD}⚠️  FIREWALL CONFIGURATION (MANUAL ACTION REQUIRED):${NC}"
-echo -e "To allow incoming connections from your remote feeders, please ensure"
-echo -e "port ${GREEN}${CLIENT_PORT}/tcp${NC} is open in your firewall:\n"
+# 7. Automatic Firewall Configuration
+echo -e "\n${BLUE}[6/6] Automatically configuring local firewall for port ${CLIENT_PORT}/tcp...${NC}"
+fw_configured=0
 
 if command -v ufw &> /dev/null; then
-    echo -e "  • ${BOLD}UFW (Ubuntu/Debian):${NC}"
-    echo -e "    ${CYAN}sudo ufw allow ${CLIENT_PORT}/tcp comment \"MLAT Feeder Ingress\"${NC}\n"
+    echo -e "  ${YELLOW}[*] Detected UFW. Adding allow rule for ${CLIENT_PORT}/tcp...${NC}"
+    if ufw allow "${CLIENT_PORT}/tcp" comment "ADSB MLAT Feeder Ingress" &> /dev/null; then
+        echo -e "  ${GREEN}[✓] UFW rule added successfully: ${CLIENT_PORT}/tcp is OPEN.${NC}"
+        fw_configured=1
+    fi
 fi
 
-if command -v firewall-cmd &> /dev/null; then
-    echo -e "  • ${BOLD}firewalld (RHEL/CentOS/Fedora):${NC}"
-    echo -e "    ${CYAN}sudo firewall-cmd --permanent --add-port=${CLIENT_PORT}/tcp${NC}"
-    echo -e "    ${CYAN}sudo firewall-cmd --reload${NC}\n"
+if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld 2>/dev/null; then
+    echo -e "  ${YELLOW}[*] Detected firewalld. Adding rule for ${CLIENT_PORT}/tcp...${NC}"
+    if firewall-cmd --permanent --add-port="${CLIENT_PORT}/tcp" &> /dev/null && firewall-cmd --reload &> /dev/null; then
+        echo -e "  ${GREEN}[✓] firewalld rule added and reloaded: ${CLIENT_PORT}/tcp is OPEN.${NC}"
+        fw_configured=1
+    fi
 fi
 
-echo -e "  • ${BOLD}iptables:${NC}"
-echo -e "    ${CYAN}sudo iptables -A INPUT -p tcp --dport ${CLIENT_PORT} -j ACCEPT${NC}\n"
+if [ "$fw_configured" -eq 0 ]; then
+    if command -v iptables &> /dev/null; then
+        if ! iptables -C INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null; then
+            iptables -I INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null || true
+            echo -e "  ${GREEN}[✓] iptables rule added for port ${CLIENT_PORT}/tcp.${NC}"
+            fw_configured=1
+        fi
+    fi
+fi
 
-echo -e "  • ${BOLD}Cloud Hosting (AWS, Hetzner, Oracle Cloud, GCP, DigitalOcean):${NC}"
-echo -e "    Remember to allow inbound ${GREEN}TCP ${CLIENT_PORT}${NC} in your cloud provider's"
-echo -e "    Security Group or Network Firewall dashboard.\n"
+if [ "$fw_configured" -eq 1 ]; then
+    echo -e "  ${GREEN}${BOLD}✓ Local OS firewall automatically configured!${NC}"
+else
+    echo -e "  ${YELLOW}[i] No active local firewall detected (UFW/firewalld/iptables). No local rules needed.${NC}"
+fi
+
+echo -e "\n${YELLOW}${BOLD}📌 CLOUD HOSTING FIREWALL REMINDER:${NC}"
+echo -e "If this server is running on a Cloud VPS (AWS, Hetzner, Oracle Cloud, GCP, DigitalOcean, OVH),"
+echo -e "remember to allow inbound ${GREEN}TCP port ${CLIENT_PORT}${NC} in your cloud provider's"
+echo -e "Security Group / Cloud Firewall web dashboard.\n"
 
 # 8. Service Management & Readsb Integration Notes
 echo -e "${BOLD}Management commands:${NC}"

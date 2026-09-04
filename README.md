@@ -136,13 +136,15 @@ sudo bash install.sh
 3. Compile the optimized release binary (`cargo build --release`).
 4. Install the binary to `/usr/local/bin/`.
 5. Create and enable the systemd service.
-6. Provide exact firewall instructions for your system.
+6. **Automatically detects and configures your local firewall (`ufw` / `firewalld` / `iptables`)** to open the selected Feeder TCP port.
 
 ---
 
-## 🔒 Firewall Configuration (Manual Step)
+## 🔒 Firewall Configuration
 
-To receive incoming traffic from remote feeders, allow inbound connections on your chosen Feeder Ingestion Port (e.g. `41113/tcp`):
+The automated installer (`sudo bash install.sh`) **automatically detects and opens the selected Feeder TCP port** in your local firewall (`ufw`, `firewalld`, or `iptables`).
+
+If you run a manual setup or customized firewall, ensure inbound connections on your chosen port (e.g. `41113/tcp`) are allowed:
 
 * **UFW (Ubuntu / Debian):**
   ```bash
