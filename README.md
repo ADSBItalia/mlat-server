@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/adsbitalia/branding/main/logo.png" alt="ADSBItalia Logo" width="280" onerror="this.style.display='none'"/>
+  <img src="assets/logo.png" alt="ADSBItalia Logo" width="280" onerror="this.style.display='none'"/>
 </p>
 
 <h1 align="center">🛰️ ADSBItalia Native Rust MLAT Server</h1>
