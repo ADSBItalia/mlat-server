@@ -18,6 +18,10 @@ pub struct HandshakeRequest {
     pub uuid: Option<String>,
     #[serde(default)]
     pub compress: Option<serde_json::Value>,
+    #[serde(default)]
+    pub return_results: Option<bool>,
+    #[serde(default)]
+    pub return_result_format: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +36,7 @@ pub struct Receiver {
     pub last_seen: Instant,
     pub messages_received: u64,
     pub mlat_positions_contributed: u64,
+    pub return_results: bool,
 }
 
 impl Receiver {
@@ -40,6 +45,7 @@ impl Receiver {
         let ecef = geo.to_ecef();
         let now = Instant::now();
         let ver = req.client_version.unwrap_or_else(|| "0.4.2".to_string());
+        let ret_res = req.return_results.unwrap_or(false);
 
         Self {
             user: req.user,
@@ -52,6 +58,7 @@ impl Receiver {
             last_seen: now,
             messages_received: 0,
             mlat_positions_contributed: 0,
+            return_results: ret_res,
         }
     }
 }

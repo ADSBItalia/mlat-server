@@ -56,6 +56,7 @@ pub struct ServerState {
     solver_tx: mpsc::Sender<u64>,
     inflight_frames: Arc<DashMap<u64, (u32, Vec<PendingMsgReception>, Option<i32>, bool, Instant)>>,
     inflight_syncs: Arc<DashMap<u64, (GeodeticPoint, Vec<PendingSyncReception>, Instant)>>,
+    client_txs: Arc<DashMap<Arc<str>, mpsc::Sender<String>>>,
 }
 
 fn hash_payload(payload: &[u8]) -> u64 {
@@ -121,6 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         solver_tx: solver_tx.clone(),
         inflight_frames: Arc::new(DashMap::new()),
         inflight_syncs: Arc::new(DashMap::new()),
+        client_txs: Arc::new(DashMap::new()),
     });
 
     let listener = TcpListener::bind(&client_listen).await?;
@@ -259,6 +261,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
 
                                     let _ = state_for_solver.sbs_tx.send(sbs_line);
+
+                                    // Forward MLAT results back to participating feeders
+                                    let now_unix = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs_f64();
+
+                                    let (nsvel, ewvel) = match (speed_opt, track_opt) {
+                                        (Some(spd), Some(trk)) => {
+                                            let rad = (trk as f64).to_radians();
+                                            let ns = ((rad.cos() * (spd as f64) * 10.0).round() / 10.0) as f64;
+                                            let ew = ((rad.sin() * (spd as f64) * 10.0).round() / 10.0) as f64;
+                                            (Some(ns), Some(ew))
+                                        }
+                                        _ => (None, None),
+                                    };
+
+                                    let result_msg = serde_json::json!({
+                                        "result": {
+                                            "@": (now_unix * 1000.0).round() / 1000.0,
+                                            "addr": format!("{:06x}", icao),
+                                            "lat": (lat * 100000.0).round() / 100000.0,
+                                            "lon": (lon * 100000.0).round() / 100000.0,
+                                            "alt": final_alt.unwrap_or(0),
+                                            "callsign": serde_json::Value::Null,
+                                            "squawk": serde_json::Value::Null,
+                                            "nsvel": nsvel,
+                                            "ewvel": ewvel,
+                                            "vrate": vrate_opt,
+                                            "gdop": (sol.gdop * 10.0).round() / 10.0,
+                                            "nstations": measurements.len()
+                                        }
+                                    });
+                                    let result_str = result_msg.to_string();
+
+                                    for (rx_u, _) in &synced_list {
+                                        if let Some(client_tx) = state_for_solver.client_txs.get(&**rx_u) {
+                                            let _ = client_tx.try_send(result_str.clone());
+                                        }
+                                    }
                                     info!(
                                         "[MLAT-RUST-SOLVED] ICAO={:06X} Stns={} Lat={:.4} Lon={:.4} Alt={:?}ft Spd={:?}kt Trk={:?} VRate={:?}fpm GDOP={:.1}",
                                         icao,
@@ -393,6 +435,7 @@ async fn handle_receiver_connection(
         }
     };
 
+    let return_results_wanted = handshake_req.return_results.unwrap_or(false);
     let user_name = handshake_req.user.clone();
     let user_arc: Arc<str> = Arc::from(user_name.as_str());
     let receiver = Receiver::new(handshake_req, peer_ip);
@@ -408,12 +451,17 @@ async fn handle_receiver_connection(
     let ack_doc = serde_json::json!({
         "compress": "zlib",
         "reconnect_in": serde_json::Value::Null,
-        "status": "ok"
+        "status": "ok",
+        "return_results": return_results_wanted
     });
     let ack_str = format!("{}\n", serde_json::to_string(&ack_doc)?);
     write_half.write_all(ack_str.as_bytes()).await?;
 
-    let (tx, mut rx) = mpsc::channel::<String>(64);
+    let (tx, mut rx) = mpsc::channel::<String>(256);
+
+    if return_results_wanted {
+        state.client_txs.insert(user_arc.clone(), tx.clone());
+    }
 
     tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
@@ -477,6 +525,7 @@ async fn handle_receiver_connection(
     state.receivers.remove(&user_name);
     state.clock_sync.remove_receiver(&user_name);
     state.tracker.remove_receiver(&user_name);
+    state.client_txs.remove(&user_arc);
     Ok(())
 }
 
