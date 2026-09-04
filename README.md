@@ -112,6 +112,9 @@ Receivers using standard low-cost RTL-SDR dongles experience oscillator frequenc
 
 ---
 
+### 6. Per-Feeder Real-Time Return Results Forwarding
+In addition to broadcasting global BaseStation SBS telemetry to the central aggregator (e.g. `readsb` on port `32007`), the Rust MLAT Server tracks which stations contributed to each TDoA solution. For every connected feeder that requested `return_results: true` in its handshake, the server immediately constructs and returns the JSON position payload (`{"result": {...}}`) with velocity (`nsvel`, `ewvel`) and vertical rate back over the persistent TCP stream. This enables community feeders to view network-calculated MLAT aircraft directly on their local `tar1090`, `dump1090`, or `Ultrafeeder` receiver maps.
+
 ## 🚀 Quick Start (Automated Installer)
 
 The easiest way to install and configure the server is using the interactive English wizard:
