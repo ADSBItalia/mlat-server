@@ -128,10 +128,11 @@ sudo bash install.sh
 ### The interactive wizard will:
 1. Detect and verify your **Rust/Cargo** toolchain (installs Rustup automatically if missing).
 2. Prompt you for custom ports and settings:
-   * **Feeder TCP Port** (Default: `41113`)
-   * **BaseStation SBS Port** (Default: `32007`)
+   * **Feeder TCP Port** (Default: `41113`) — *Ingestion port for feeder connections and bidirectional MLAT return results stream.*
+   * **BaseStation SBS Port** (Default: `32007`) — *Egress port for central aggregator / readsb / tar1090 live map.*
    * **Working Directory** (Default: `/var/lib/mlat-server`)
    * **Service Name** (Default: `adsb-mlat-server`)
+   > 💡 **MLAT Return Port Note**: On the server side, return results are automatically multiplexed back to feeders over the **Feeder TCP Port (`41113`)**. Feeders do **not** require any inbound ports on the server; they simply configure their own local receiver port (Default: `33106` for `readsb` / `tar1090`, or `39008` for `Ultrafeeder` / `ADSB.im`) in the feeder client.
 3. Compile the optimized release binary (`cargo build --release`).
 4. Install the binary to `/usr/local/bin/`.
 5. Create and enable the systemd service.
@@ -161,6 +162,39 @@ To receive incoming traffic from remote feeders, allow inbound connections on yo
 
 * **Cloud Providers (AWS, Hetzner, Oracle Cloud, GCP, DigitalOcean, OVH):**
   Ensure TCP port `41113` is permitted in your cloud provider's **Security Group** or **Firewall Rules** dashboard.
+
+---
+
+## 🔄 Feeder MLAT Return & Client Port Configuration
+
+The server provides **native bidirectional MLAT return streams**. When remote feeders sync with this server, they can receive network-solved positions back onto their local radar maps (`tar1090`, `readsb`, `dump1090`, `Ultrafeeder`):
+
+### How it works:
+1. **Full-Duplex TCP**: Feeders initiate an outbound TCP connection to the server's Feeder Port (e.g. `mlat.adsbitalia.it:41113`).
+2. **No Feeder Port-Forwarding**: Feeders do **not** need to open any ports on their home router or firewall.
+3. **Local Feeder Return Port**: The feeder client receives the computed positions over the persistent stream and forwards them locally to its own decoder.
+
+### Feeder Client Connection Examples:
+
+#### A. Standard `mlat-client` (Standalone Linux / Raspberry Pi)
+```bash
+mlat-client --input-type dump1090 --input-connect 127.0.0.1:30005 \
+  --server mlat.adsbitalia.it:41113 --user MyStationName \
+  --lat 45.4642 --lon 9.1900 --alt 120m \
+  --results beast,connect,127.0.0.1:33106
+```
+*(Port `33106` is the local readsb Beast ingestion port configured automatically by our [Feeding installer](https://github.com/ADSBItalia/Feeding)).*
+
+#### B. Docker Ultrafeeder (SDR-Enthusiasts Stack)
+```yaml
+ULTRAFEEDER_CONFIG:
+  - adsb,adsbitalia.it,31108,beast_reduce_plus_out
+  - mlat,mlat.adsbitalia.it,41113,39008
+```
+*(Port `39008` is the local container port where Ultrafeeder receives MLAT return traffic).*
+
+#### C. ADSB.im Feeder Image
+Natively integrated in **Data Sharing** tab (ADSB.im v3.0.13+): automatically manages the connection and binds the internal MLAT return port.
 
 ---
 
