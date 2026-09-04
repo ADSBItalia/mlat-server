@@ -117,8 +117,8 @@ Receivers using standard low-cost RTL-SDR dongles experience oscillator frequenc
 The easiest way to install and configure the server is using the interactive English wizard:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/adsb-mlat-server.git
-cd adsb-mlat-server
+git clone https://github.com/ADSBItalia/mlat-server.git
+cd mlat-server
 sudo bash install.sh
 ```
 
