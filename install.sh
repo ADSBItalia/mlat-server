@@ -171,12 +171,43 @@ if command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld
 fi
 
 if [ "$fw_configured" -eq 0 ]; then
+    # 1. Native iptables (IPv4 & IPv6)
     if command -v iptables &> /dev/null; then
+        echo -e "  ${YELLOW}[*] Configuring native iptables rules for ${CLIENT_PORT}/tcp...${NC}"
         if ! iptables -C INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null; then
             iptables -I INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null || true
-            echo -e "  ${GREEN}[✓] iptables rule added for port ${CLIENT_PORT}/tcp.${NC}"
-            fw_configured=1
         fi
+        
+        # Also configure IPv6 if ip6tables is available
+        if command -v ip6tables &> /dev/null; then
+            if ! ip6tables -C INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null; then
+                ip6tables -I INPUT -p tcp --dport "${CLIENT_PORT}" -j ACCEPT 2>/dev/null || true
+            fi
+        fi
+
+        echo -e "  ${GREEN}[✓] iptables rules injected for port ${CLIENT_PORT}/tcp.${NC}"
+        fw_configured=1
+
+        # Automatically save iptables rules to survive system reboot
+        if command -v netfilter-persistent &> /dev/null; then
+            netfilter-persistent save &> /dev/null || true
+            echo -e "  ${GREEN}[✓] iptables rules persisted via netfilter-persistent.${NC}"
+        elif [ -d "/etc/iptables" ]; then
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            [ -x "$(command -v ip6tables-save)" ] && ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+            echo -e "  ${GREEN}[✓] iptables rules saved to /etc/iptables/rules.v4.${NC}"
+        elif command -v service &> /dev/null && service iptables status &> /dev/null; then
+            service iptables save &> /dev/null || true
+            echo -e "  ${GREEN}[✓] iptables rules saved via system service.${NC}"
+        fi
+    fi
+
+    # 2. nftables (if active without iptables wrapper)
+    if command -v nft &> /dev/null && systemctl is-active --quiet nftables 2>/dev/null; then
+        echo -e "  ${YELLOW}[*] Detected active nftables. Applying allow rule...${NC}"
+        nft add rule inet filter input tcp dport "${CLIENT_PORT}" accept 2>/dev/null || true
+        echo -e "  ${GREEN}[✓] nftables rule added for port ${CLIENT_PORT}/tcp.${NC}"
+        fw_configured=1
     fi
 fi
 
