@@ -331,7 +331,7 @@ impl AircraftTracker {
             }
 
             let dist_first = ecef_distance(&filter.pos_ecef, &sol_ecef);
-            let max_first = (350.0 * dt + 400.0).max(500.0);
+            let max_first = (260.0 * dt + 300.0).max(450.0);
             if dist_first > max_first {
                 // First point was an outlier, re-seed candidate fix ONLY within physical range of anchor
                 filter.pos_ecef = sol_ecef;
@@ -339,10 +339,17 @@ impl AircraftTracker {
                 filter.last_update = now;
                 return None;
             }
-            // Correlated 2nd point! Initialize velocity vector
-            let init_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
-            let init_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
-            let init_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
+            // Correlated 2nd point! Initialize velocity vector with physical speed clamp (max 260 m/s = 505 kts)
+            let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
+            let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
+            let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
+            let init_v_mag = (raw_vx * raw_vx + raw_vy * raw_vy + raw_vz * raw_vz).sqrt();
+            let (init_vx, init_vy, init_vz) = if init_v_mag > 260.0 {
+                let s = 260.0 / init_v_mag;
+                (raw_vx * s, raw_vy * s, raw_vz * s)
+            } else {
+                (raw_vx, raw_vy, raw_vz)
+            };
             filter.pos_ecef = sol_ecef;
             filter.vel_ecef = (init_vx, init_vy, init_vz);
             filter.geo = sol_geo;
@@ -361,29 +368,32 @@ impl AircraftTracker {
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
 
         // Absolute physical speed barrier from last confirmed position
-        // Enforces that an aircraft cannot exceed Mach 1.0 (340 m/s) relative to last confirmed fix.
-        // Completely suppresses 15-20km hyperbolic mirror jumps when receivers are collinear!
+        // Enforces that an aircraft cannot exceed 260 m/s (505 kts) relative to last confirmed fix.
+        // Completely suppresses hyperbolic mirror jumps and teleports!
         let dist_from_last = ecef_distance(&filter.pos_ecef, &sol_ecef);
-        let max_phys_jump = (340.0 * dt + 600.0).max(1_000.0);
+        let max_phys_jump = (260.0 * dt + 350.0).max(600.0);
         if dist_from_last > max_phys_jump {
             filter.consecutive_rejects += 1;
             return None;
         }
 
-        // 3-station gate: reject degenerate collinear geometries (GDOP > 5.5) while allowing valid 3-stn triangles
-        if receiver_count == 3 && filter.hits >= 4 && gdop > 5.5 {
-            return None;
+        // 3-station gate: reject degenerate collinear geometries (GDOP > 3.5)
+        // With only 3 stations (zero mathematical redundancy), loose GDOP causes lateral jumping!
+        if receiver_count == 3 {
+            let max_g = if filter.hits >= 4 { 3.5 } else { 3.0 };
+            if gdop > max_g {
+                return None;
+            }
         }
 
-        // 3. Innovation distance check
-        let gdop_scale = (gdop / 3.0).clamp(1.0, 1.6);
+        // 3. Innovation distance check: strict bounds for 3 stations to prevent clock drift from bending the track
+        let gdop_scale = (gdop / 3.0).clamp(1.0, 1.4);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
-        // Innovation check: allows normal cruise speeds up to 550 kts (280 m/s) with reasonable jitter margin
         let max_allowed = if receiver_count == 3 {
-            (280.0 * dt + 200.0).max(350.0)
+            (200.0 * dt + 120.0).max(220.0)
         } else {
-            (320.0 * dt + 220.0 * gdop_scale).max(350.0)
+            (260.0 * dt + 160.0 * gdop_scale).max(300.0)
         };
 
         if dist > max_allowed {
@@ -436,13 +446,13 @@ impl AircraftTracker {
         };
 
         // Dynamically weight by GDOP, stations and residual RMS:
-        // On 3-station fixes, residual is mathematically unconstrained (zero degrees of freedom).
-        // Heavily damp 3-station fixes during cruise to prevent lateral track wobbling!
+        // On 3-station fixes, residual is unconstrained.
+        // Heavily damp 3-station fixes so they CANNOT violently alter the velocity vector!
         let (alpha, beta) = if receiver_count == 3 {
             if filter.hits >= 4 {
-                (0.08, 0.008) // Cruise damping: locks track to straight heading
+                (0.06, 0.005) // Heavy cruise damping: preserves smooth heading without zigzag
             } else {
-                (0.16, 0.025)
+                (0.12, 0.015)
             }
         } else {
             // 4+ stations: full geometric redundancy & RAIM verified
@@ -450,8 +460,8 @@ impl AircraftTracker {
             let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.5, 1.2);
             let quality_scale = (gdop_factor * rms_factor).clamp(0.30, 1.4);
             (
-                (base_alpha * quality_scale).clamp(0.08, 0.40),
-                (base_beta * quality_scale).clamp(0.01, 0.08),
+                (base_alpha * quality_scale).clamp(0.08, 0.35),
+                (base_beta * quality_scale).clamp(0.01, 0.06),
             )
         };
 
@@ -460,8 +470,8 @@ impl AircraftTracker {
         let new_z = pred_z + alpha * rz;
         let new_ecef = EcefPoint::new(new_x, new_y, new_z);
 
-        // Physical acceleration limit: max 10.0 m/s^2 (~1g)
-        let max_dv = (10.0 * dt).max(0.5);
+        // Physical acceleration limit: max 6.0 m/s^2 (~0.6g, standard civil aviation turn rate)
+        let max_dv = (6.0 * dt).max(0.3);
         let raw_dv_x = beta * (rx / dt);
         let raw_dv_y = beta * (ry / dt);
         let raw_dv_z = beta * (rz / dt);
@@ -474,10 +484,10 @@ impl AircraftTracker {
         let mut new_vy = filter.vel_ecef.1 + clamped_dv_y;
         let mut new_vz = filter.vel_ecef.2 + clamped_dv_z;
 
-        // Clamp velocity magnitude to max 380 m/s
+        // Clamp velocity magnitude to max 260 m/s (505 kts)
         let v_mag = (new_vx * new_vx + new_vy * new_vy + new_vz * new_vz).sqrt();
-        if v_mag > 380.0 {
-            let scale = 380.0 / v_mag;
+        if v_mag > 260.0 {
+            let scale = 260.0 / v_mag;
             new_vx *= scale;
             new_vy *= scale;
             new_vz *= scale;

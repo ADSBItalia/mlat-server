@@ -322,7 +322,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Batch dispatcher worker running every 30ms (Fast low-latency dispatch)
+    // Batch dispatcher worker running every 30ms:
+    // Dispatches 4+ stations after 320ms.
+    // For 3-station frames, waits up to 600ms so a 4th station delayed by internet jitter has time to arrive!
     let state_for_dispatch = state.clone();
     let solver_tx_clone = solver_tx.clone();
     tokio::spawn(async move {
@@ -333,8 +335,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for entry in state_for_dispatch.inflight_frames.iter() {
                 let (_, receptions, _, dispatched, created) = entry.value();
                 let age = created.elapsed();
-                if !*dispatched && ((receptions.len() >= 4 && age >= Duration::from_millis(220)) || (receptions.len() >= 3 && age >= Duration::from_millis(420))) {
-                    ready.push(*entry.key());
+                if !*dispatched {
+                    if receptions.len() >= 4 && age >= Duration::from_millis(320) {
+                        ready.push(*entry.key());
+                    } else if receptions.len() >= 3 && age >= Duration::from_millis(600) {
+                        ready.push(*entry.key());
+                    }
                 }
             }
             for h in ready {
@@ -348,26 +354,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Fast in-flight buffer cleaner running every 50ms (Tightly limits in-flight RAM)
+    // In-flight buffer cleaner running every 80ms:
+    // Retains single-receiver frames up to 500ms and 2-receiver frames up to 750ms.
+    // Completely eliminates feeder packet starvation over internet jitter while keeping RAM tight!
     let state_for_cleanup = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        let mut interval = tokio::time::interval(Duration::from_millis(80));
         loop {
             interval.tick().await;
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
                 if *dispatched {
-                    age < Duration::from_millis(100)
+                    age < Duration::from_millis(250)
                 } else if receptions.len() < 2 {
-                    age < Duration::from_millis(180)
-                } else if receptions.len() == 2 {
-                    age < Duration::from_millis(450)
-                } else {
                     age < Duration::from_millis(500)
+                } else if receptions.len() == 2 {
+                    age < Duration::from_millis(750)
+                } else {
+                    age < Duration::from_millis(900)
                 }
             });
             state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
-                created.elapsed() < Duration::from_millis(300)
+                created.elapsed() < Duration::from_millis(500)
             });
         }
     });
