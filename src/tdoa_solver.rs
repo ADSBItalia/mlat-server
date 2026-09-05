@@ -50,15 +50,20 @@ impl ExactSolver {
         // 1. Try full measurement set first
         let full_sol = self.solve_raw(measurements, altitude_m, max_gdop, initial_guess);
 
-        // If the full solution is exceptionally clean (RMS <= 6.0m), use it directly
+        // If the full solution is good (RMS <= 8.0m), use it directly without subset pruning
         if let Some(ref sol) = full_sol {
-            if sol.residual_rms <= 6.0 {
+            if sol.residual_rms <= 8.0 {
                 return full_sol;
             }
         }
 
-        // 2. RAIM Leave-One-Out: if full solution is marginal, failed, or n >= 4, test subsets of size n-1
-        let min_subset_size = if has_alt { 3 } else { 4 };
+        // 2. RAIM Leave-One-Out Fault Exclusion:
+        // Requires genuine redundancy in the remaining subset!
+        // With altitude, 4 variables (x,y,z,dt) require at least 4 stations in the subset
+        // (4 stations + 1 altitude = 5 equations, 1 degree of freedom).
+        // Therefore, Leave-One-Out subset pruning is ONLY mathematically valid when n >= 5 (with alt) or n >= 6 (without alt)!
+        // When n == 4 with altitude, the overdetermined 4-station solution is geometrically stable and must NEVER be pruned to 3!
+        let min_subset_size = if has_alt { 4 } else { 5 };
         if n > min_subset_size {
             let mut best_subset_sol: Option<SolverSolution> = None;
             let mut best_rms = full_sol.as_ref().map_or(999.0, |s| s.residual_rms);
@@ -80,8 +85,8 @@ impl ExactSolver {
             }
 
             if let Some(sol) = best_subset_sol {
-                // Prefer pruned subset if full solution failed or if subset improved RMS by >= 15%
-                if full_sol.is_none() || sol.residual_rms < full_sol.as_ref().unwrap().residual_rms * 0.85 {
+                // Prefer pruned subset if full solution failed or if subset improved RMS by >= 35%
+                if full_sol.is_none() || sol.residual_rms < full_sol.as_ref().unwrap().residual_rms * 0.65 {
                     return Some(sol);
                 }
             }

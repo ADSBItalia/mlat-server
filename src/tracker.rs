@@ -258,13 +258,12 @@ impl AircraftTracker {
 
         if !is_active {
             // New track acquisition or re-acquisition after signal drop:
-            // MUST require at least 4 receivers to guarantee geometric redundancy!
-            if receiver_count < 4 {
+            // Allow 3 receivers when GDOP is strictly verified (<= 3.2), or 4+ receivers (<= 4.5)
+            if receiver_count < 3 {
                 return None;
             }
-            // For initial track acquisition or re-acquisition after signal drop:
-            // Require tight GDOP (<= 4.5) to avoid seeding on a false hyperbolic mirror branch!
-            if gdop > 4.5 {
+            let max_init_gdop = if receiver_count == 3 { 3.2 } else { 4.5 };
+            if gdop > max_init_gdop {
                 return None;
             }
 
@@ -331,12 +330,8 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
-            // Correlation confirmation must also have 4+ receivers
-            if receiver_count < 4 {
-                return None;
-            }
-            // Correlation fix must also have clean geometry
-            if gdop > 4.5 {
+            let max_conf_gdop = if receiver_count == 3 { 3.2 } else { 4.5 };
+            if gdop > max_conf_gdop {
                 return None;
             }
             let total_dt = filter.anchor_time.elapsed().as_secs_f64();
@@ -394,15 +389,15 @@ impl AircraftTracker {
             return None;
         }
 
-        // 3-station gate: only allowed on established cruise tracks with recent updates (<= 6.0s)
+        // 3-station gate: require clean geometry (GDOP <= 3.2)
         if receiver_count == 3 {
-            if filter.hits < 4 || dt > 6.0 || gdop > 3.5 {
+            if gdop > 3.2 {
                 return None;
             }
         }
 
         // GDOP gate: reject degenerate collinear geometries
-        let max_g = if receiver_count == 3 { 3.5 } else { 5.5 };
+        let max_g = if receiver_count == 3 { 3.2 } else { 5.5 };
         if gdop > max_g {
             return None;
         }

@@ -184,8 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .or_else(|| state_for_solver.tracker.get_interpolated_altitude(icao))
                         .map(|ft| (ft as f64) * 0.3048);
 
-                    let has_recent = state_for_solver.tracker.has_recent_position(icao, Duration::from_secs(6));
-                    let min_rcvs = if alt_m.is_some() && has_recent { 3 } else { 4 };
+                    let min_rcvs = if alt_m.is_some() { 3 } else { 4 };
 
                     if icao == 0xAE61FD {
                         info!("[AE61FD-PRE-SOLVE] meas={} min_rcvs={} alt_m={:?}", measurements.len(), min_rcvs, alt_m);
@@ -215,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             measurements = select_optimal_cluster(measurements, &guess);
                         }
 
-                        let max_gdop = if measurements.len() >= 4 { 5.5 } else { 4.0 };
+                        let max_gdop = if measurements.len() >= 4 { 5.5 } else { 3.2 };
 
                         let sol_opt = state_for_solver.solver.solve(&measurements, alt_m, Some(max_gdop), guess);
                         if icao == 0xAE61FD {
