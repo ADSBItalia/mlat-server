@@ -322,21 +322,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Batch dispatcher worker running every 40ms (Zero spawned tasks per frame!)
+    // Batch dispatcher worker running every 30ms (Fast low-latency dispatch)
     let state_for_dispatch = state.clone();
     let solver_tx_clone = solver_tx.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(40));
+        let mut interval = tokio::time::interval(Duration::from_millis(30));
         loop {
             interval.tick().await;
             let mut ready = Vec::new();
             for entry in state_for_dispatch.inflight_frames.iter() {
                 let (_, receptions, _, dispatched, created) = entry.value();
                 let age = created.elapsed();
-                if !*dispatched && ((receptions.len() >= 4 && age >= Duration::from_millis(650)) || age >= Duration::from_millis(850)) {
-                    if receptions.len() >= 3 {
-                        ready.push(*entry.key());
-                    }
+                if !*dispatched && ((receptions.len() >= 4 && age >= Duration::from_millis(220)) || (receptions.len() >= 3 && age >= Duration::from_millis(420))) {
+                    ready.push(*entry.key());
                 }
             }
             for h in ready {
@@ -350,26 +348,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Fast in-flight buffer cleaner (runs every 100ms: drops expired packet hashes)
+    // Fast in-flight buffer cleaner running every 50ms (Tightly limits in-flight RAM)
     let state_for_cleanup = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
         loop {
             interval.tick().await;
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
-                if receptions.len() < 2 && age >= Duration::from_millis(350) {
-                    false // Drop single-receiver frames at 350ms (preserves 85% RAM reduction)
-                } else if receptions.len() == 2 && age >= Duration::from_millis(850) {
-                    false // Allow up to 850ms for 3rd/4th receiver to arrive over internet jitter
-                } else if *dispatched {
-                    age < Duration::from_millis(1000)
+                if *dispatched {
+                    age < Duration::from_millis(100)
+                } else if receptions.len() < 2 {
+                    age < Duration::from_millis(180)
+                } else if receptions.len() == 2 {
+                    age < Duration::from_millis(450)
                 } else {
-                    age < Duration::from_millis(1200)
+                    age < Duration::from_millis(500)
                 }
             });
             state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
-                created.elapsed() < Duration::from_millis(600)
+                created.elapsed() < Duration::from_millis(300)
             });
         }
     });
