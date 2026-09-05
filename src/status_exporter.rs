@@ -6,6 +6,8 @@ use std::fs;
 use std::time::SystemTime;
 
 /// Periodically export clients.json and sync.json to workdir
+/// Uses the standard flat dictionary format expected by admin control center,
+/// collect-feed-status daemon, Telegram bot and feed APIs.
 pub fn export_mlat_status(
     work_dir: &str,
     receivers: &DashMap<String, Receiver>,
@@ -16,8 +18,8 @@ pub fn export_mlat_status(
         .unwrap_or_default()
         .as_secs_f64();
 
-    // 1. Build clients.json
-    let mut clients_obj = serde_json::Map::new();
+    // 1. Build clients.json (Standard flat dictionary keyed directly by feeder user)
+    let mut clients_map = serde_json::Map::new();
     for entry in receivers.iter() {
         let r = entry.value();
         let peer_count = clock_sync.get_sync_peer_count(&r.user);
@@ -40,32 +42,30 @@ pub fn export_mlat_status(
             "peers": peer_count,
             "peer_count": peer_count,
         });
-        clients_obj.insert(r.user.clone(), cdata);
+        clients_map.insert(r.user.clone(), cdata);
     }
-
-    let clients_doc = json!({
-        "now": now,
-        "clients": clients_obj,
-    });
 
     let clients_path = format!("{}/clients.json", work_dir);
     let tmp_clients_path = format!("{}/clients.json.tmp", work_dir);
-    if let Ok(content) = serde_json::to_string(&clients_doc) {
+    if let Ok(content) = serde_json::to_string(&clients_map) {
         if fs::write(&tmp_clients_path, content).is_ok() {
             let _ = fs::rename(&tmp_clients_path, &clients_path);
         }
     }
 
-    // 2. Build sync.json
-    let sync_map = clock_sync.export_sync_map();
-    let sync_doc = json!({
-        "now": now,
-        "sync": sync_map,
-    });
+    // 2. Build sync.json (Standard format keyed by user with "peers" sub-dictionary)
+    let raw_sync = clock_sync.export_sync_map();
+    let mut sync_map = serde_json::Map::new();
+    for (user, peers) in raw_sync {
+        sync_map.insert(user, json!({
+            "peers": peers,
+            "bad_syncs": {}
+        }));
+    }
 
     let sync_path = format!("{}/sync.json", work_dir);
     let tmp_sync_path = format!("{}/sync.json.tmp", work_dir);
-    if let Ok(content) = serde_json::to_string(&sync_doc) {
+    if let Ok(content) = serde_json::to_string(&sync_map) {
         if fs::write(&tmp_sync_path, content).is_ok() {
             let _ = fs::rename(&tmp_sync_path, &sync_path);
         }
