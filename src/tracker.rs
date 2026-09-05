@@ -402,6 +402,20 @@ impl AircraftTracker {
             return None;
         }
 
+        // 3-station consistency gate on established tracks:
+        // A 3-station solve has zero degrees of freedom (unverified clock/collinearity).
+        // If an aircraft has already been established (hits >= 3), require that any 3-station solve
+        // is strictly consistent with the predicted trajectory (within 280m).
+        // This completely prevents clock-drifted 3-station solves from jerking an established 4-station track sideways!
+        if receiver_count == 3 && filter.hits >= 3 {
+            let dist_pred = ecef_distance(&pred_ecef, &sol_ecef);
+            let max_3stn_dev = (160.0 * dt + 220.0).min(380.0);
+            if dist_pred > max_3stn_dev {
+                filter.consecutive_rejects += 1;
+                return None;
+            }
+        }
+
         // 3. Innovation distance check: realistic bounds to prevent filter starvation
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.4);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
@@ -466,20 +480,20 @@ impl AircraftTracker {
         let rz = sol_ecef.z - pred_z;
 
         let (base_alpha, base_beta) = if filter.hits < 4 {
-            (0.80, 0.40) // Acquisition: track true positions immediately
+            (0.50, 0.20) // Fast initial acquisition lock
         } else {
-            (0.65, 0.25) // Smooth cruising: eliminate phase lag while filtering jitter
+            (0.25, 0.08) // Cruising: smooth low-pass inertial filtering (Kalman-like, zero jerk)
         };
 
         let (alpha, beta) = if receiver_count == 3 {
-            (0.20, 0.05) // Gentle tracking on 3 stations
+            (0.10, 0.02) // Very gentle cruise tracking on 3 stations: absorbs inter-station timing jitter
         } else {
             let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.6, 1.2);
             let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.7, 1.2);
             let quality_scale = (gdop_factor * rms_factor).clamp(0.50, 1.3);
             (
-                (base_alpha * quality_scale).clamp(0.40, 0.85),
-                (base_beta * quality_scale).clamp(0.10, 0.45),
+                (base_alpha * quality_scale).clamp(0.15, 0.35),
+                (base_beta * quality_scale).clamp(0.04, 0.12),
             )
         };
 
@@ -488,8 +502,8 @@ impl AircraftTracker {
         let new_z = pred_z + alpha * rz;
         let new_ecef = EcefPoint::new(new_x, new_y, new_z);
 
-        // Physical acceleration limit: max 6.0 m/s^2 (~0.6g, standard civil aviation turn rate)
-        let max_dv = (6.0 * dt).max(0.3);
+        // Physical acceleration limit: max 4.0 m/s^2 (~0.4g, smooth civil aviation turn rate)
+        let max_dv = (4.0 * dt).max(0.2);
         let raw_dv_x = beta * (rx / dt);
         let raw_dv_y = beta * (ry / dt);
         let raw_dv_z = beta * (rz / dt);
@@ -549,8 +563,8 @@ impl AircraftTracker {
             filter.anchor_time = now;
         }
 
-        // 6. SBS emission throttle: emit at most every 400ms to prevent jittering on maps
-        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(400);
+        // 6. SBS emission throttle: emit at most every 900ms to synchronize with readsb/tar1090 1-sec cycles
+        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(900);
         if should_emit {
             filter.last_sbs_emission = now;
         }
