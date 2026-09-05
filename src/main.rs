@@ -350,27 +350,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Cleanup worker (Tight smart memory pruning)
+    // Fast in-flight buffer cleaner (runs every 100ms: drops expired packet hashes)
     let state_for_cleanup = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(250));
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
-                if receptions.len() < 2 && age >= Duration::from_millis(350) {
-                    false // Fast drop single-receiver frames: saves 80% RAM!
+                if receptions.len() < 2 && age >= Duration::from_millis(150) {
+                    false // Fast drop single-receiver frames (150ms)
+                } else if receptions.len() == 2 && age >= Duration::from_millis(250) {
+                    false // Fast drop 2-receiver frames (250ms)
                 } else if *dispatched {
-                    age < Duration::from_millis(2500)
+                    age < Duration::from_millis(500)
                 } else {
-                    age < Duration::from_millis(1500)
+                    age < Duration::from_millis(600)
                 }
             });
             state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
-                created.elapsed() < Duration::from_millis(500)
+                created.elapsed() < Duration::from_millis(300)
             });
-            state_for_cleanup.tracker.cleanup_stale();
-            state_for_cleanup.clock_sync.cleanup_stale();
+        }
+    });
+
+    // Slow background garbage collector (runs every 20s: prunes stale aircraft & pairings)
+    let state_for_gc = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            interval.tick().await;
+            state_for_gc.tracker.cleanup_stale();
+            state_for_gc.clock_sync.cleanup_stale();
         }
     });
 

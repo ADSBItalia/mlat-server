@@ -345,6 +345,9 @@ impl ClockSyncGraph {
             return None;
         }
 
+        let mut best: Option<(String, Vec<(String, f64)>)> = None;
+        let mut max_synced = 0;
+
         for candidate_idx in 0..observations.len() {
             let root = &observations[candidate_idx].0;
             let mut synchronized = Vec::with_capacity(observations.len());
@@ -359,12 +362,21 @@ impl ClockSyncGraph {
                 }
             }
 
-            if synchronized.len() >= 3 {
-                return Some((root.clone(), synchronized));
+            if synchronized.len() > max_synced {
+                max_synced = synchronized.len();
+                best = Some((root.clone(), synchronized));
+                // If all candidate stations synced to this root, we cannot do better
+                if max_synced == observations.len() {
+                    break;
+                }
             }
         }
 
-        None
+        if max_synced >= 3 {
+            best
+        } else {
+            None
+        }
     }
 
     pub fn convert_clock(&self, src: &str, t_src: f64, dst: &str) -> Option<f64> {

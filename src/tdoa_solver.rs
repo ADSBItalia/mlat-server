@@ -50,14 +50,14 @@ impl ExactSolver {
         // 1. Try full measurement set first
         let full_sol = self.solve_raw(measurements, altitude_m, max_gdop, initial_guess);
 
-        // If the full solution is excellent (RMS <= 14.0m), use it directly
+        // If the full solution is exceptionally clean (RMS <= 6.0m), use it directly
         if let Some(ref sol) = full_sol {
-            if sol.residual_rms <= 14.0 {
+            if sol.residual_rms <= 6.0 {
                 return full_sol;
             }
         }
 
-        // 2. RAIM Leave-One-Out: if full solution is marginal or failed, test subsets of size n-1
+        // 2. RAIM Leave-One-Out: if full solution is marginal, failed, or n >= 4, test subsets of size n-1
         let min_subset_size = if has_alt { 3 } else { 4 };
         if n > min_subset_size {
             let mut best_subset_sol: Option<SolverSolution> = None;
@@ -80,8 +80,10 @@ impl ExactSolver {
             }
 
             if let Some(sol) = best_subset_sol {
-                // Return the pruned subset solution if it improved the RMS
-                return Some(sol);
+                // Prefer pruned subset if full solution failed or if subset improved RMS by >= 15%
+                if full_sol.is_none() || sol.residual_rms < full_sol.as_ref().unwrap().residual_rms * 0.85 {
+                    return Some(sol);
+                }
             }
         }
 

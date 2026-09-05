@@ -30,7 +30,7 @@ pub struct TrackedAircraft {
     pub vertical_rate_fpm: Option<f32>,
     pub last_seen: Instant,
     pub last_adsb_time: Option<Instant>,
-    pub tracking_receivers: HashSet<String>,
+    pub tracking_receivers: HashSet<Arc<str>>,
 }
 
 impl TrackedAircraft {
@@ -79,19 +79,19 @@ impl AircraftTracker {
         self.receiver_positions.remove(user);
         self.receiver_tracking.remove(user);
         for mut ac in self.aircraft.iter_mut() {
-            ac.tracking_receivers.remove(user);
+            ac.tracking_receivers.retain(|u| &**u != user);
         }
     }
 
-    pub fn record_add(&self, icao: u32, user: &str) {
+    pub fn record_add(&self, icao: u32, user: &Arc<str>) {
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
             entry.last_seen = now;
-            entry.tracking_receivers.insert(user.to_string());
+            entry.tracking_receivers.insert(Arc::clone(user));
         }
 
-        if let Some(mut set) = self.receiver_tracking.get_mut(user) {
+        if let Some(mut set) = self.receiver_tracking.get_mut(&**user) {
             set.insert(icao);
         }
     }
@@ -109,14 +109,14 @@ impl AircraftTracker {
         }
     }
 
-    pub fn record_seen(&self, icao: u32, user: &str) {
+    pub fn record_seen(&self, icao: u32, user: &Arc<str>) {
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
             entry.last_seen = now;
-            entry.tracking_receivers.insert(user.to_string());
+            entry.tracking_receivers.insert(Arc::clone(user));
         }
-        if let Some(mut set) = self.receiver_tracking.get_mut(user) {
+        if let Some(mut set) = self.receiver_tracking.get_mut(&**user) {
             set.insert(icao);
         }
     }
@@ -275,14 +275,19 @@ impl AircraftTracker {
             return None;
         }
 
+        // 3-station gate: for established cruise, reject loose GDOP to prevent lateral wiggles
+        if receiver_count == 3 && filter.hits >= 4 && gdop > 3.8 {
+            return None;
+        }
+
         // 3. Innovation distance check
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.6);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
-        // 3-station fixes have zero mathematical redundancy: require tight innovation (<600m)
+        // 3-station fixes have zero mathematical redundancy: require tight innovation
         // to prevent single-receiver clock drift from pulling the track sideways!
         let max_allowed = if receiver_count == 3 {
-            (260.0 * dt + 180.0).max(300.0)
+            (220.0 * dt + 150.0).max(250.0)
         } else {
             (320.0 * dt + 220.0 * gdop_scale).max(350.0)
         };
@@ -331,20 +336,30 @@ impl AircraftTracker {
         let rz = sol_ecef.z - pred_z;
 
         let (base_alpha, base_beta) = if filter.hits < 6 {
-            (0.30, 0.06) // Acquisition
+            (0.28, 0.05) // Acquisition
         } else {
-            (0.18, 0.025) // Smooth cruising
+            (0.16, 0.020) // Smooth cruising
         };
 
-        // Dynamically weight by GDOP and residual RMS:
-        // Lower GDOP & lower residual -> higher weight to observation
-        // Higher GDOP or higher residual -> rely more on velocity prediction model
-        let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.3, 1.3);
-        let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.4, 1.2);
-        let quality_scale = (gdop_factor * rms_factor).clamp(0.25, 1.4);
-
-        let alpha = (base_alpha * quality_scale).clamp(0.08, 0.50);
-        let beta = (base_beta * quality_scale).clamp(0.01, 0.12);
+        // Dynamically weight by GDOP, stations and residual RMS:
+        // On 3-station fixes, residual is mathematically unconstrained (zero degrees of freedom).
+        // Heavily damp 3-station fixes during cruise to prevent lateral track wobbling!
+        let (alpha, beta) = if receiver_count == 3 {
+            if filter.hits >= 4 {
+                (0.08, 0.008) // Cruise damping: locks track to straight heading
+            } else {
+                (0.16, 0.025)
+            }
+        } else {
+            // 4+ stations: full geometric redundancy & RAIM verified
+            let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.4, 1.3);
+            let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.5, 1.2);
+            let quality_scale = (gdop_factor * rms_factor).clamp(0.30, 1.4);
+            (
+                (base_alpha * quality_scale).clamp(0.08, 0.40),
+                (base_beta * quality_scale).clamp(0.01, 0.08),
+            )
+        };
 
         let new_x = pred_x + alpha * rx;
         let new_y = pred_y + alpha * ry;
