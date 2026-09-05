@@ -255,17 +255,24 @@ impl AircraftTracker {
         let pred_z = filter.pos_ecef.z + filter.vel_ecef.2 * dt;
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
 
-        // 3. Innovation distance check (max realistic speed: 340 m/s ~ 660 kts)
-        let gdop_scale = (gdop / 4.0).clamp(1.0, 1.8);
+        // 3. Innovation distance check
+        let gdop_scale = (gdop / 3.0).clamp(1.0, 1.6);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
-        let max_allowed = (340.0 * dt + 280.0 * gdop_scale).max(380.0);
+        
+        // 3-station fixes have zero mathematical redundancy: require tight innovation (<600m)
+        // to prevent single-receiver clock drift from pulling the track sideways!
+        let max_allowed = if receiver_count == 3 {
+            (260.0 * dt + 180.0).max(300.0)
+        } else {
+            (320.0 * dt + 220.0 * gdop_scale).max(350.0)
+        };
 
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
             
-            // Maneuver recovery: ONLY if deviation is local (< 4,500m) and persists for 5 consecutive fixes.
-            // NEVER teleport tens of kilometers away to an outlier or mirror branch!
-            if dist < 4_500.0 && filter.consecutive_rejects >= 5 {
+            // Maneuver recovery: ONLY allowed with 4+ stations, within 1,200 meters,
+            // and persisting for 6 consecutive frames. 3-station fixes NEVER trigger maneuver recovery!
+            if receiver_count >= 4 && dist < 1_200.0 && filter.consecutive_rejects >= 6 {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
