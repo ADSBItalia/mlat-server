@@ -267,8 +267,8 @@ impl ExactSolver {
         }
 
         let hth = h.transpose() * h;
-        let real_gdop = match hth.pseudo_inverse(1e-6) {
-            Ok(inv) => {
+        let real_gdop = match hth.try_inverse() {
+            Some(inv) => {
                 let tr = inv.trace();
                 if tr > 0.0 && !tr.is_nan() {
                     tr.sqrt()
@@ -276,7 +276,7 @@ impl ExactSolver {
                     99.0
                 }
             }
-            Err(_) => 99.0,
+            None => 99.0,
         };
 
         // 4. GDOP cutoff to eliminate geometrically ambiguous solutions

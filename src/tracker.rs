@@ -383,7 +383,7 @@ impl AircraftTracker {
         // Enforces that an aircraft cannot exceed 280 m/s (544 kts) relative to last confirmed fix.
         // Completely suppresses hyperbolic mirror jumps and teleports!
         let dist_from_last = ecef_distance(&filter.pos_ecef, &sol_ecef);
-        let max_phys_jump = (280.0 * dt + 600.0).max(800.0);
+        let max_phys_jump = (270.0 * dt + 250.0).max(450.0);
         if dist_from_last > max_phys_jump {
             filter.consecutive_rejects += 1;
             return None;
@@ -409,7 +409,7 @@ impl AircraftTracker {
         // This completely prevents clock-drifted 3-station solves from jerking an established 4-station track sideways!
         if receiver_count == 3 && filter.hits >= 3 {
             let dist_pred = ecef_distance(&pred_ecef, &sol_ecef);
-            let max_3stn_dev = (220.0 * dt + 400.0).min(1500.0);
+            let max_3stn_dev = (180.0 * dt + 250.0).min(650.0);
             if dist_pred > max_3stn_dev {
                 filter.consecutive_rejects += 1;
                 return None;
@@ -421,9 +421,9 @@ impl AircraftTracker {
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
         let max_allowed = if receiver_count == 3 {
-            (220.0 * dt + 300.0).max(450.0)
+            (180.0 * dt + 250.0).max(400.0)
         } else {
-            (280.0 * dt + 600.0 * gdop_scale).max(800.0)
+            (270.0 * dt + 400.0 * gdop_scale).max(650.0)
         };
 
         if dist > max_allowed {
@@ -431,7 +431,7 @@ impl AircraftTracker {
             
             // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 3,000 meters,
             // and persisting for 3 consecutive frames. Calculates physical velocity instead of freezing to zero!
-            if gdop <= 5.0 && dist < 4_000.0 && filter.consecutive_rejects >= 3 {
+            if receiver_count >= 4 && gdop <= 4.5 && dist < 3_500.0 && filter.consecutive_rejects >= 3 {
                 let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
                 let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
                 let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
