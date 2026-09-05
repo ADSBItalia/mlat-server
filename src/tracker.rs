@@ -250,7 +250,8 @@ impl AircraftTracker {
 
         if !is_active {
             // New track acquisition or re-acquisition after signal drop:
-            if receiver_count < 3 {
+            // MUST require at least 4 receivers to guarantee geometric redundancy!
+            if receiver_count < 4 {
                 return None;
             }
             // For initial track acquisition or re-acquisition after signal drop:
@@ -322,6 +323,10 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
+            // Correlation confirmation must also have 4+ receivers
+            if receiver_count < 4 {
+                return None;
+            }
             // Correlation fix must also have clean geometry
             if gdop > 4.5 {
                 return None;
@@ -381,12 +386,15 @@ impl AircraftTracker {
             return None;
         }
 
+        // 3-station gate: only allowed on established cruise tracks with recent updates (<= 6.0s)
+        if receiver_count == 3 {
+            if filter.hits < 4 || dt > 6.0 || gdop > 3.5 {
+                return None;
+            }
+        }
+
         // GDOP gate: reject degenerate collinear geometries
-        let max_g = if receiver_count == 3 {
-            if filter.hits >= 4 { 3.5 } else { 3.0 }
-        } else {
-            5.5
-        };
+        let max_g = if receiver_count == 3 { 3.5 } else { 5.5 };
         if gdop > max_g {
             return None;
         }
@@ -421,8 +429,8 @@ impl AircraftTracker {
             }
             
             // If track was completely dark for > 25 seconds, reset state cleanly
-            // ONLY if solution is within physical subsonic distance of last known fix AND has clean GDOP!
-            if dt > 25.0 && dist_from_last <= max_phys_jump && gdop <= 4.5 {
+            // ONLY if solution has 4+ receivers, is within physical subsonic distance of last known fix AND has clean GDOP!
+            if dt > 25.0 && receiver_count >= 4 && dist_from_last <= max_phys_jump && gdop <= 4.5 {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
