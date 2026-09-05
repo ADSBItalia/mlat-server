@@ -348,8 +348,8 @@ impl AircraftTracker {
             return None;
         }
 
-        // 3-station gate: for established cruise, reject loose GDOP to prevent lateral wiggles
-        if receiver_count == 3 && filter.hits >= 4 && gdop > 3.8 {
+        // 3-station gate: reject degenerate collinear geometries (GDOP > 5.5) while allowing valid 3-stn triangles
+        if receiver_count == 3 && filter.hits >= 4 && gdop > 5.5 {
             return None;
         }
 
@@ -357,10 +357,9 @@ impl AircraftTracker {
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.6);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
-        // 3-station fixes have zero mathematical redundancy: require tight innovation
-        // to prevent single-receiver clock drift from pulling the track sideways!
+        // Innovation check: allows normal cruise speeds up to 550 kts (280 m/s) with reasonable jitter margin
         let max_allowed = if receiver_count == 3 {
-            (220.0 * dt + 150.0).max(250.0)
+            (280.0 * dt + 200.0).max(350.0)
         } else {
             (320.0 * dt + 220.0 * gdop_scale).max(350.0)
         };

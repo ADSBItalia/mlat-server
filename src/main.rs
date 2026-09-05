@@ -358,18 +358,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval.tick().await;
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
-                if receptions.len() < 2 && age >= Duration::from_millis(150) {
-                    false // Fast drop single-receiver frames (150ms)
-                } else if receptions.len() == 2 && age >= Duration::from_millis(250) {
-                    false // Fast drop 2-receiver frames (250ms)
+                if receptions.len() < 2 && age >= Duration::from_millis(350) {
+                    false // Drop single-receiver frames at 350ms (preserves 85% RAM reduction)
+                } else if receptions.len() == 2 && age >= Duration::from_millis(850) {
+                    false // Allow up to 850ms for 3rd/4th receiver to arrive over internet jitter
                 } else if *dispatched {
-                    age < Duration::from_millis(500)
+                    age < Duration::from_millis(1000)
                 } else {
-                    age < Duration::from_millis(600)
+                    age < Duration::from_millis(1200)
                 }
             });
             state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
-                created.elapsed() < Duration::from_millis(300)
+                created.elapsed() < Duration::from_millis(600)
             });
         }
     });
