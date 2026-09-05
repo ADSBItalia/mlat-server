@@ -230,7 +230,7 @@ impl ExactSolver {
         // 2. Radio horizon validation: receiving antennas within 550 km line of sight
         for (rx_pos, _, _) in &pseudorange_data {
             let dist = ecef_distance(&final_pos, rx_pos);
-            if dist > 550_000.0 {
+            if dist > 450_000.0 {
                 return None;
             }
         }
@@ -273,12 +273,12 @@ impl ExactSolver {
         };
 
         // 4. GDOP cutoff to eliminate geometrically ambiguous solutions
-        if real_gdop > max_gdop.unwrap_or(35.0) {
+        if real_gdop > max_gdop.unwrap_or(12.0) {
             return None;
         }
 
         // 5. Residual RMS cutoff: reject inconsistent solutions (bad clock/multipath)
-        if final_rms > 40.0 {
+        if final_rms > 18.0 {
             return None;
         }
 

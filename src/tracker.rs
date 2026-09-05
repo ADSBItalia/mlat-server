@@ -188,8 +188,12 @@ impl AircraftTracker {
 
         if !is_active {
             // New track acquisition or re-acquisition after signal drop:
-            // Require 3+ stations when solver converged with valid GDOP and radio horizon
             if receiver_count < 3 {
+                return None;
+            }
+            // For 3-station fixes on initial acquisition, require tight GDOP (<= 6.5)
+            // to avoid seeding on a false hyperbolic mirror branch!
+            if receiver_count == 3 && gdop > 6.5 {
                 return None;
             }
 
@@ -201,13 +205,15 @@ impl AircraftTracker {
                 speed_kts: None,
                 last_update: now,
                 last_sbs_emission: now,
-                hits: 1,
+                hits: 1, // Pending correlation
                 consecutive_rejects: 0,
                 anchor_pos: sol_ecef,
                 anchor_time: now,
             };
             entry.filter = Some(filter);
-            return Some((sol_geo, None, None, None));
+            // Require at least 2 correlated observations before painting on map.
+            // Eliminates single-ping glitches and stray phantom targets!
+            return None;
         }
 
         let cached_baro_vrate = entry.vertical_rate_fpm;
@@ -219,22 +225,62 @@ impl AircraftTracker {
             return None;
         }
 
+        // Track correlation confirmation (hits == 1)
+        if filter.hits < 2 {
+            let dist_first = ecef_distance(&filter.pos_ecef, &sol_ecef);
+            let max_first = (350.0 * dt + 400.0).max(500.0);
+            if dist_first > max_first {
+                // First point was an outlier, re-seed candidate fix
+                filter.pos_ecef = sol_ecef;
+                filter.geo = sol_geo;
+                filter.last_update = now;
+                return None;
+            }
+            // Correlated 2nd point! Initialize velocity vector
+            let init_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
+            let init_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
+            let init_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
+            filter.pos_ecef = sol_ecef;
+            filter.vel_ecef = (init_vx, init_vy, init_vz);
+            filter.geo = sol_geo;
+            filter.hits = 2;
+            filter.last_update = now;
+            filter.last_sbs_emission = now;
+            return Some((sol_geo, None, None, None));
+        }
+
         // 2. Predict position using current velocity
         let pred_x = filter.pos_ecef.x + filter.vel_ecef.0 * dt;
         let pred_y = filter.pos_ecef.y + filter.vel_ecef.1 * dt;
         let pred_z = filter.pos_ecef.z + filter.vel_ecef.2 * dt;
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
 
-        // 3. Innovation distance check (max realistic speed: 380 m/s ~ 740 kts)
-        // Scaled slightly if GDOP is higher to prevent falsely rejecting noisy but valid fixes
-        let gdop_scale = (gdop / 4.0).clamp(1.0, 2.0);
+        // 3. Innovation distance check (max realistic speed: 340 m/s ~ 660 kts)
+        let gdop_scale = (gdop / 4.0).clamp(1.0, 1.8);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
-        let max_allowed = (380.0 * dt + 350.0 * gdop_scale).max(450.0);
+        let max_allowed = (340.0 * dt + 280.0 * gdop_scale).max(380.0);
 
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
-            // Maneuver recovery: if 3 consecutive rejects occur or dt > 8s, re-acquire track immediately!
-            if filter.consecutive_rejects >= 3 || dt > 8.0 {
+            
+            // Maneuver recovery: ONLY if deviation is local (< 4,500m) and persists for 5 consecutive fixes.
+            // NEVER teleport tens of kilometers away to an outlier or mirror branch!
+            if dist < 4_500.0 && filter.consecutive_rejects >= 5 {
+                filter.pos_ecef = sol_ecef;
+                filter.vel_ecef = (0.0, 0.0, 0.0);
+                filter.geo = sol_geo;
+                filter.track_deg = None;
+                filter.speed_kts = None;
+                filter.last_update = now;
+                filter.consecutive_rejects = 0;
+                filter.hits = 2;
+                filter.anchor_pos = sol_ecef;
+                filter.anchor_time = now;
+                return Some((sol_geo, None, None, None));
+            }
+            
+            // If track was completely dark for > 25 seconds, reset state cleanly
+            if dt > 25.0 {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
@@ -245,21 +291,21 @@ impl AircraftTracker {
                 filter.hits = 1;
                 filter.anchor_pos = sol_ecef;
                 filter.anchor_time = now;
-                return Some((sol_geo, None, None, None));
+                return None;
             }
             return None;
         }
         filter.consecutive_rejects = 0;
 
-        // 4. GDOP-Adaptive Alpha-Beta Filter update
+        // 4. GDOP-Adaptive Alpha-Beta Filter update (Smooth trajectory without zigzag)
         let rx = sol_ecef.x - pred_x;
         let ry = sol_ecef.y - pred_y;
         let rz = sol_ecef.z - pred_z;
 
         let (base_alpha, base_beta) = if filter.hits < 6 {
-            (0.35, 0.08) // Gentle acquisition
+            (0.30, 0.06) // Acquisition
         } else {
-            (0.22, 0.035) // Steady cruising smoothing
+            (0.18, 0.025) // Smooth cruising
         };
 
         // Dynamically weight by GDOP and residual RMS:
