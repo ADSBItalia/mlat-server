@@ -226,7 +226,15 @@ impl AircraftTracker {
     }
 
     pub fn get_last_ecef(&self, icao: u32) -> Option<EcefPoint> {
-        self.aircraft.get(&icao).and_then(|ac| ac.filter.as_ref().map(|f| f.pos_ecef))
+        self.aircraft.get(&icao).and_then(|ac| {
+            ac.filter.as_ref().and_then(|f| {
+                if f.last_update.elapsed() <= Duration::from_secs(20) {
+                    Some(f.pos_ecef)
+                } else {
+                    None
+                }
+            })
+        })
     }
 
     /// Speed sanity check, hyperbolic mirror rejection & GDOP-adaptive alpha-beta trajectory smoothing.
@@ -377,10 +385,10 @@ impl AircraftTracker {
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
 
         // Absolute physical speed barrier from last confirmed position
-        // Enforces that an aircraft cannot exceed 260 m/s (505 kts) relative to last confirmed fix.
+        // Enforces that an aircraft cannot exceed 280 m/s (544 kts) relative to last confirmed fix.
         // Completely suppresses hyperbolic mirror jumps and teleports!
         let dist_from_last = ecef_distance(&filter.pos_ecef, &sol_ecef);
-        let max_phys_jump = (260.0 * dt + 350.0).max(600.0);
+        let max_phys_jump = (280.0 * dt + 600.0).max(800.0);
         if dist_from_last > max_phys_jump {
             filter.consecutive_rejects += 1;
             return None;
@@ -399,30 +407,40 @@ impl AircraftTracker {
             return None;
         }
 
-        // 3. Innovation distance check: strict bounds for 3 stations to prevent clock drift from bending the track
+        // 3. Innovation distance check: realistic bounds to prevent filter starvation
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.4);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
         let max_allowed = if receiver_count == 3 {
-            (200.0 * dt + 120.0).max(220.0)
+            (220.0 * dt + 300.0).max(450.0)
         } else {
-            (260.0 * dt + 160.0 * gdop_scale).max(300.0)
+            (280.0 * dt + 600.0 * gdop_scale).max(800.0)
         };
 
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
             
-            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 1,200 meters,
-            // and persisting for 6 consecutive frames. 3-station fixes NEVER trigger maneuver recovery!
-            if receiver_count >= 4 && gdop <= 4.5 && dist < 1_200.0 && filter.consecutive_rejects >= 6 {
+            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 3,000 meters,
+            // and persisting for 3 consecutive frames. Calculates physical velocity instead of freezing to zero!
+            if receiver_count >= 4 && gdop <= 4.5 && dist < 3_000.0 && filter.consecutive_rejects >= 3 {
+                let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
+                let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
+                let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
+                let v_mag = (raw_vx * raw_vx + raw_vy * raw_vy + raw_vz * raw_vz).sqrt();
+                let (init_vx, init_vy, init_vz) = if v_mag > 280.0 {
+                    let s = 280.0 / v_mag;
+                    (raw_vx * s, raw_vy * s, raw_vz * s)
+                } else {
+                    (raw_vx, raw_vy, raw_vz)
+                };
                 filter.pos_ecef = sol_ecef;
-                filter.vel_ecef = (0.0, 0.0, 0.0);
+                filter.vel_ecef = (init_vx, init_vy, init_vz);
                 filter.geo = sol_geo;
                 filter.track_deg = None;
                 filter.speed_kts = None;
                 filter.last_update = now;
                 filter.consecutive_rejects = 0;
-                filter.hits = 2;
+                filter.hits = 3;
                 filter.anchor_pos = sol_ecef;
                 filter.anchor_time = now;
                 return Some((sol_geo, None, None, None));
@@ -452,29 +470,21 @@ impl AircraftTracker {
         let ry = sol_ecef.y - pred_y;
         let rz = sol_ecef.z - pred_z;
 
-        let (base_alpha, base_beta) = if filter.hits < 6 {
-            (0.28, 0.05) // Acquisition
+        let (base_alpha, base_beta) = if filter.hits < 4 {
+            (0.80, 0.40) // Acquisition: track true positions immediately
         } else {
-            (0.16, 0.020) // Smooth cruising
+            (0.65, 0.25) // Smooth cruising: eliminate phase lag while filtering jitter
         };
 
-        // Dynamically weight by GDOP, stations and residual RMS:
-        // On 3-station fixes, residual is unconstrained.
-        // Heavily damp 3-station fixes so they CANNOT violently alter the velocity vector!
         let (alpha, beta) = if receiver_count == 3 {
-            if filter.hits >= 4 {
-                (0.06, 0.005) // Heavy cruise damping: preserves smooth heading without zigzag
-            } else {
-                (0.12, 0.015)
-            }
+            (0.20, 0.05) // Gentle tracking on 3 stations
         } else {
-            // 4+ stations: full geometric redundancy & RAIM verified
-            let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.4, 1.3);
-            let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.5, 1.2);
-            let quality_scale = (gdop_factor * rms_factor).clamp(0.30, 1.4);
+            let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.6, 1.2);
+            let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.7, 1.2);
+            let quality_scale = (gdop_factor * rms_factor).clamp(0.50, 1.3);
             (
-                (base_alpha * quality_scale).clamp(0.08, 0.35),
-                (base_beta * quality_scale).clamp(0.01, 0.06),
+                (base_alpha * quality_scale).clamp(0.40, 0.85),
+                (base_beta * quality_scale).clamp(0.10, 0.45),
             )
         };
 
@@ -533,7 +543,7 @@ impl AircraftTracker {
         if anchor_dt >= 6.0 {
             let net_disp = ecef_distance(&filter.anchor_pos, &new_ecef);
             let avg_kts = (net_disp / anchor_dt) * 1.94384;
-            if avg_kts < 40.0 {
+            if new_geo.alt < 1500.0 && avg_kts < 40.0 {
                 new_vx = 0.0;
                 new_vy = 0.0;
                 new_vz = 0.0;
