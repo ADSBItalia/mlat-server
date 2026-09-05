@@ -661,7 +661,7 @@ fn process_json_message(
                 let alt_ft = extract_altitude(&payload);
                 let (df, icao) = extract_icao_and_df(&payload).unwrap_or((0, 0));
 
-                if icao > 0 {
+                if icao > 0 && !state.tracker.is_fixed_beacon(icao) {
                     if icao == 0xAE61FD {
                         info!("[AE61FD-RX] user={} df={} alt={:?}", user_name, df, alt_ft);
                     }

@@ -2,7 +2,12 @@ use crate::coordinates::{
     ecef2llh, ecef_distance, ecef_vel_to_track_speed, EcefPoint, GeodeticPoint,
 };
 use dashmap::DashMap;
+use flate2::read::GzDecoder;
+use log::info;
+use parking_lot::RwLock;
 use std::collections::HashSet;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,14 +58,17 @@ pub struct AircraftTracker {
     aircraft: Arc<DashMap<u32, TrackedAircraft>>,
     receiver_positions: Arc<DashMap<String, (EcefPoint, GeodeticPoint)>>,
     receiver_tracking: Arc<DashMap<String, HashSet<u32>>>,
+    fixed_ground_beacons: Arc<RwLock<HashSet<u32>>>,
 }
 
 impl Default for AircraftTracker {
     fn default() -> Self {
+        let fixed = Self::load_fixed_beacons();
         Self {
             aircraft: Arc::new(DashMap::new()),
             receiver_positions: Arc::new(DashMap::new()),
             receiver_tracking: Arc::new(DashMap::new()),
+            fixed_ground_beacons: Arc::new(RwLock::new(fixed)),
         }
     }
 }
@@ -68,6 +76,59 @@ impl Default for AircraftTracker {
 impl AircraftTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load known fixed ground stations, airport towers (TWR), ground test transponders (GND),
+    /// radar Site Status Monitors (SSM), and masts to permanently exclude them from MLAT.
+    pub fn load_fixed_beacons() -> HashSet<u32> {
+        let mut set = HashSet::new();
+        let paths = [
+            "/usr/local/share/tar1090/aircraft.csv.gz",
+            "/var/lib/adsbitalia-tar1090-db/aircraft.csv.gz",
+        ];
+        for path in &paths {
+            if let Ok(file) = File::open(path) {
+                let gz = GzDecoder::new(file);
+                let reader = BufReader::new(gz);
+                for line in reader.lines().filter_map(|l| l.ok()) {
+                    let mut parts = line.split(';');
+                    if let (Some(hex_str), Some(reg), Some(type_code)) = (parts.next(), parts.next(), parts.next()) {
+                        let t_up = type_code.to_ascii_uppercase();
+                        let reg_up = reg.to_ascii_uppercase();
+                        if matches!(t_up.as_str(), "TWR" | "GND" | "OBST" | "MAST" | "RADAR")
+                            || matches!(reg_up.as_str(), "TWR" | "GND")
+                            || reg_up.starts_with("SSM")
+                        {
+                            if let Ok(icao) = u32::from_str_radix(hex_str.trim(), 16) {
+                                set.insert(icao);
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        // Custom blacklist file support
+        if let Ok(file) = File::open("/var/lib/mlat-server/blacklist.txt") {
+            let reader = BufReader::new(file);
+            for line in reader.lines().filter_map(|l| l.ok()) {
+                let s = line.trim();
+                if !s.is_empty() && !s.starts_with('#') {
+                    if let Ok(icao) = u32::from_str_radix(s, 16) {
+                        set.insert(icao);
+                    }
+                }
+            }
+        }
+        // Ensure known Sydney SSM2 radar calibration monitor is blocked
+        set.insert(0x7CF7CB);
+        info!("[MLAT-TRACKER] Loaded {} fixed ground beacons/towers to permanently exclude from MLAT.", set.len());
+        set
+    }
+
+    #[inline]
+    pub fn is_fixed_beacon(&self, icao: u32) -> bool {
+        self.fixed_ground_beacons.read().contains(&icao)
     }
 
     pub fn set_receiver_position(&self, user: String, ecef: EcefPoint, geo: GeodeticPoint) {
@@ -84,6 +145,9 @@ impl AircraftTracker {
     }
 
     pub fn record_add(&self, icao: u32, user: &Arc<str>) {
+        if self.is_fixed_beacon(icao) {
+            return;
+        }
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
@@ -110,6 +174,9 @@ impl AircraftTracker {
     }
 
     pub fn record_seen(&self, icao: u32, user: &Arc<str>) {
+        if self.is_fixed_beacon(icao) {
+            return;
+        }
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
@@ -122,6 +189,9 @@ impl AircraftTracker {
     }
 
     pub fn is_mlat_candidate(&self, icao: u32) -> bool {
+        if self.is_fixed_beacon(icao) {
+            return false;
+        }
         if let Some(ac) = self.aircraft.get(&icao) {
             if let Some(t) = ac.last_adsb_time {
                 if t.elapsed() < Duration::from_secs(60) {
@@ -143,6 +213,9 @@ impl AircraftTracker {
         let mut sync_candidates = Vec::new();
 
         for icao in icaos {
+            if self.is_fixed_beacon(icao) {
+                continue;
+            }
             let seen_count = self.aircraft.get(&icao).map_or(1, |ac| ac.tracking_receivers.len());
             if self.is_mlat_candidate(icao) {
                 // Request MLAT if seen by 2 or more receivers or already tracked
