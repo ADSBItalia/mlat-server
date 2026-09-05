@@ -227,10 +227,18 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
+            let total_dt = filter.anchor_time.elapsed().as_secs_f64();
+            let dist_from_anchor = ecef_distance(&filter.anchor_pos, &sol_ecef);
+            let max_phys = (340.0 * total_dt + 600.0).max(1_000.0);
+            if dist_from_anchor > max_phys {
+                // Reject impossible teleportation / hyperbolic mirror jump
+                return None;
+            }
+
             let dist_first = ecef_distance(&filter.pos_ecef, &sol_ecef);
             let max_first = (350.0 * dt + 400.0).max(500.0);
             if dist_first > max_first {
-                // First point was an outlier, re-seed candidate fix
+                // First point was an outlier, re-seed candidate fix ONLY within physical range of anchor
                 filter.pos_ecef = sol_ecef;
                 filter.geo = sol_geo;
                 filter.last_update = now;
@@ -246,6 +254,8 @@ impl AircraftTracker {
             filter.hits = 2;
             filter.last_update = now;
             filter.last_sbs_emission = now;
+            filter.anchor_pos = sol_ecef;
+            filter.anchor_time = now;
             return Some((sol_geo, None, None, None));
         }
 
@@ -254,6 +264,16 @@ impl AircraftTracker {
         let pred_y = filter.pos_ecef.y + filter.vel_ecef.1 * dt;
         let pred_z = filter.pos_ecef.z + filter.vel_ecef.2 * dt;
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
+
+        // Absolute physical speed barrier from last confirmed position
+        // Enforces that an aircraft cannot exceed Mach 1.0 (340 m/s) relative to last confirmed fix.
+        // Completely suppresses 15-20km hyperbolic mirror jumps when receivers are collinear!
+        let dist_from_last = ecef_distance(&filter.pos_ecef, &sol_ecef);
+        let max_phys_jump = (340.0 * dt + 600.0).max(1_000.0);
+        if dist_from_last > max_phys_jump {
+            filter.consecutive_rejects += 1;
+            return None;
+        }
 
         // 3. Innovation distance check
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.6);
@@ -287,7 +307,8 @@ impl AircraftTracker {
             }
             
             // If track was completely dark for > 25 seconds, reset state cleanly
-            if dt > 25.0 {
+            // ONLY if solution is within physical subsonic distance of last known fix!
+            if dt > 25.0 && dist_from_last <= max_phys_jump {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
