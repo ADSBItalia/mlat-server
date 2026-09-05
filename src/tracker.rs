@@ -262,7 +262,7 @@ impl AircraftTracker {
             if receiver_count < 3 {
                 return None;
             }
-            let max_init_gdop = if receiver_count == 3 { 3.2 } else { 4.5 };
+            let max_init_gdop = if receiver_count == 3 { 4.8 } else { 5.2 };
             if gdop > max_init_gdop {
                 return None;
             }
@@ -330,7 +330,7 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
-            let max_conf_gdop = if receiver_count == 3 { 3.2 } else { 4.5 };
+            let max_conf_gdop = if receiver_count == 3 { 4.8 } else { 5.2 };
             if gdop > max_conf_gdop {
                 return None;
             }
@@ -391,13 +391,13 @@ impl AircraftTracker {
 
         // 3-station gate: require clean geometry (GDOP <= 3.2)
         if receiver_count == 3 {
-            if gdop > 3.2 {
+            if gdop > 5.2 {
                 return None;
             }
         }
 
         // GDOP gate: reject degenerate collinear geometries
-        let max_g = if receiver_count == 3 { 3.2 } else { 5.5 };
+        let max_g = 5.2;
         if gdop > max_g {
             return None;
         }
@@ -409,7 +409,7 @@ impl AircraftTracker {
         // This completely prevents clock-drifted 3-station solves from jerking an established 4-station track sideways!
         if receiver_count == 3 && filter.hits >= 3 {
             let dist_pred = ecef_distance(&pred_ecef, &sol_ecef);
-            let max_3stn_dev = (160.0 * dt + 220.0).min(380.0);
+            let max_3stn_dev = (220.0 * dt + 400.0).min(1500.0);
             if dist_pred > max_3stn_dev {
                 filter.consecutive_rejects += 1;
                 return None;
@@ -431,7 +431,7 @@ impl AircraftTracker {
             
             // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 3,000 meters,
             // and persisting for 3 consecutive frames. Calculates physical velocity instead of freezing to zero!
-            if receiver_count >= 4 && gdop <= 4.5 && dist < 3_000.0 && filter.consecutive_rejects >= 3 {
+            if gdop <= 5.0 && dist < 4_000.0 && filter.consecutive_rejects >= 3 {
                 let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
                 let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
                 let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;

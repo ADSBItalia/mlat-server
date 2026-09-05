@@ -197,17 +197,21 @@ pub fn format_sbs_msg3(
     let time_str = now.format("%H:%M:%S%.3f").to_string();
 
     let alt_str = alt_ft.map(|a| a.to_string()).unwrap_or_default();
+    let spd_str = speed.map(|s| format!("{:.1}", s)).unwrap_or_default();
+    let trk_str = track.map(|t| format!("{:.1}", t)).unwrap_or_default();
     let vrate_str = vrate_fpm.map(|v| v.to_string()).unwrap_or_default();
 
     format!(
-        "MSG,3,1,1,{},1,{},{},{},{},,{},,,{:.6},{:.6},{},,{},,,0\r\n",
+        "MSG,3,1,1,{},1,{},{},{},{},,{},{},{},{:.6},{:.6},{},,{},,,0\r\n",
         icao,
         date_str,
         time_str,
         date_str,
         time_str,
         alt_str,
-                geo.lat,
+        spd_str,
+        trk_str,
+        geo.lat,
         geo.lon,
         vrate_str,
         receivers_count

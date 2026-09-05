@@ -214,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             measurements = select_optimal_cluster(measurements, &guess);
                         }
 
-                        let max_gdop = if measurements.len() >= 4 { 5.5 } else { 3.2 };
+                        let max_gdop = 5.2;
 
                         let sol_opt = state_for_solver.solver.solve(&measurements, alt_m, Some(max_gdop), guess);
                         if icao == 0xAE61FD {
@@ -508,6 +508,25 @@ async fn handle_receiver_connection(
         }
     });
 
+    let tx_traffic = tx.clone();
+    let state_traffic = state.clone();
+    let user_name_traffic = user_name.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            let wanted = state_traffic.tracker.get_receiver_candidate_icaos(&user_name_traffic);
+            if !wanted.is_empty() {
+                let resp = serde_json::json!({
+                    "start_sending": wanted
+                });
+                if tx_traffic.send(resp.to_string()).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
     let mut decompressor = Zlib2Decompressor::new();
     let mut packet_buf = Vec::with_capacity(4096);
 
@@ -606,7 +625,6 @@ fn process_json_message(
             if let (Some(em_bytes), Some(om_bytes)) = (hex_to_bytes(em_hex), hex_to_bytes(om_hex)) {
                 if let Some((_, icao)) = extract_icao_and_df(&em_bytes) {
                     if icao > 0 {
-                        state.tracker.mark_adsb_seen(icao);
                         if let Some(a) = extract_altitude(&em_bytes) {
                             state.tracker.update_altitude_baro(icao, a);
                         }
@@ -735,7 +753,11 @@ fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
 }
 
 fn sync_adsb_from_readsb(state: &Arc<ServerState>) {
-    let path = std::path::Path::new("/run/readsb/aircraft.json");
+    let path = if std::path::Path::new("/run/readsb-ui/aircraft.json").exists() {
+        std::path::Path::new("/run/readsb-ui/aircraft.json")
+    } else {
+        std::path::Path::new("/run/readsb/aircraft.json")
+    };
     if !path.exists() {
         return;
     }
