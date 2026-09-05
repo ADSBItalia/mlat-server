@@ -37,6 +37,8 @@ pub struct TrackedAircraft {
     pub last_seen: Instant,
     pub last_adsb_time: Option<Instant>,
     pub tracking_receivers: HashSet<Arc<str>>,
+    pub last_confirmed_pos: Option<(EcefPoint, Instant)>,
+    pub last_confirmed_vel: Option<(f64, f64, f64)>,
 }
 
 impl TrackedAircraft {
@@ -51,6 +53,8 @@ impl TrackedAircraft {
             last_seen: now,
             last_adsb_time: None,
             tracking_receivers: HashSet::new(),
+            last_confirmed_pos: None,
+            last_confirmed_vel: None,
         }
     }
 }
@@ -225,10 +229,25 @@ impl AircraftTracker {
         })
     }
 
+    /// Returns the best initial guess ECEF position for TDoA solving.
+    /// Uses confirmed velocity vector to extrapolate trajectory for up to 180 seconds.
     pub fn get_last_ecef(&self, icao: u32) -> Option<EcefPoint> {
         self.aircraft.get(&icao).and_then(|ac| {
+            if let Some((pos, time)) = ac.last_confirmed_pos {
+                let dt = time.elapsed().as_secs_f64();
+                if dt <= 180.0 {
+                    if let Some(vel) = ac.last_confirmed_vel {
+                        return Some(EcefPoint::new(
+                            pos.x + vel.0 * dt,
+                            pos.y + vel.1 * dt,
+                            pos.z + vel.2 * dt,
+                        ));
+                    }
+                    return Some(pos);
+                }
+            }
             ac.filter.as_ref().and_then(|f| {
-                if f.last_update.elapsed() <= Duration::from_secs(20) {
+                if f.last_update.elapsed() <= Duration::from_secs(60) {
                     Some(f.pos_ecef)
                 } else {
                     None
@@ -251,19 +270,51 @@ impl AircraftTracker {
         let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
         let now = Instant::now();
 
-        // 1. Check if we have an active, recent track filter
+        // 1. Unconditional Global Physical Speed Barrier from last confirmed position
+        // Completely eliminates any possibility of teleportation or mirror jumps across time gaps!
+        if let Some((prev_pos, prev_time)) = entry.last_confirmed_pos {
+            let dt = prev_time.elapsed().as_secs_f64();
+            if dt <= 600.0 {
+                let dist = ecef_distance(&prev_pos, &sol_ecef);
+                // Max physical speed: 340 m/s (660 kts, ~Mach 1) + 1,200m measurement jitter allowance
+                let max_allowed_dist = 340.0 * dt + 1200.0;
+                if dist > max_allowed_dist {
+                    // Physically impossible displacement: reject outlier/mirror root immediately!
+                    if let Some(f) = entry.filter.as_mut() {
+                        f.consecutive_rejects += 1;
+                    }
+                    return None;
+                }
+            }
+        }
+
+        // 2. Strict Station Count Requirement:
+        // A 3-station solve has zero degrees of freedom and two symmetric mirror roots.
+        // It CANNOT initialize or re-acquire a track!
+        let has_confirmed_track = entry.filter.as_ref().map_or(false, |f| {
+            f.hits >= 3 && f.last_update.elapsed() <= Duration::from_secs(30)
+        });
+
+        if receiver_count < 4 && !has_confirmed_track {
+            // Reject 3-station solves on unconfirmed or stale tracks!
+            return None;
+        }
+
+        // Tighter GDOP & RMS thresholds to discard bad geometries
+        let max_gdop = if receiver_count == 3 { 3.8 } else { 4.6 };
+        if gdop > max_gdop || residual_rms > 4.5 {
+            return None;
+        }
+
+        // 3. Check if we have an active, recent track filter
         let is_active = entry.filter.as_ref().map_or(false, |f| {
             f.last_update.elapsed() <= Duration::from_secs(45)
         });
 
         if !is_active {
             // New track acquisition or re-acquisition after signal drop:
-            // Allow 3 receivers when GDOP is strictly verified (<= 3.2), or 4+ receivers (<= 4.5)
-            if receiver_count < 3 {
-                return None;
-            }
-            let max_init_gdop = if receiver_count == 3 { 4.8 } else { 5.2 };
-            if gdop > max_init_gdop {
+            // MUST HAVE AT LEAST 4 RECEIVERS!
+            if receiver_count < 4 {
                 return None;
             }
 
@@ -276,7 +327,7 @@ impl AircraftTracker {
                 speed_kts: if is_fixed { Some(0.0) } else { None },
                 last_update: now,
                 last_sbs_emission: now,
-                hits: 1, // Pending correlation
+                hits: 1, // Pending 2nd confirmation fix
                 consecutive_rejects: 0,
                 anchor_pos: sol_ecef,
                 anchor_time: now,
@@ -284,7 +335,6 @@ impl AircraftTracker {
             };
             entry.filter = Some(filter);
             // Require at least 2 correlated observations before painting on map.
-            // Eliminates single-ping glitches and stray phantom targets!
             return None;
         }
 
@@ -298,14 +348,12 @@ impl AircraftTracker {
         }
 
         // Stationary tower / ground beacon anchor:
-        // Permanently locks airport towers and ground radar calibration transponders in place!
         if filter.is_locked_stationary {
             let dist_from_anchor = ecef_distance(&filter.anchor_pos, &sol_ecef);
             if dist_from_anchor > 3500.0 {
-                return None; // Reject severe ground multipath reflection spikes
+                return None;
             }
 
-            // Gently refine centroid on the first 3 solves, then permanently freeze coordinates
             if filter.hits < 3 {
                 let count = filter.hits as f64;
                 let new_x = (filter.pos_ecef.x * count + sol_ecef.x) / (count + 1.0);
@@ -319,7 +367,6 @@ impl AircraftTracker {
 
             filter.last_update = now;
 
-            // Emit static coordinate to readsb/tar1090 at most once every 5 seconds (zero speed, no track)
             if filter.last_sbs_emission.elapsed() >= Duration::from_secs(5) {
                 filter.last_sbs_emission = now;
                 return Some((filter.geo, None, Some(0.0), Some(0)));
@@ -328,40 +375,41 @@ impl AircraftTracker {
             }
         }
 
-        // Track correlation confirmation (hits == 1)
+        // Track correlation confirmation (hits < 2)
         if filter.hits < 2 {
-            let max_conf_gdop = if receiver_count == 3 { 4.8 } else { 5.2 };
-            if gdop > max_conf_gdop {
+            if receiver_count < 4 {
                 return None;
             }
-            let total_dt = filter.anchor_time.elapsed().as_secs_f64();
-            let dist_from_anchor = ecef_distance(&filter.anchor_pos, &sol_ecef);
-            let max_phys = (260.0 * total_dt + 400.0).max(800.0);
-            if dist_from_anchor > max_phys {
-                // Reject impossible teleportation / hyperbolic mirror jump
-                return None;
-            }
-
-            let dist_first = ecef_distance(&filter.pos_ecef, &sol_ecef);
-            let max_first = (260.0 * dt + 300.0).max(450.0);
-            if dist_first > max_first {
-                // First point was an outlier, re-seed candidate fix ONLY within physical range of anchor
+            if dt > 15.0 {
+                // Too long since first hit, restart 1st hit
                 filter.pos_ecef = sol_ecef;
                 filter.geo = sol_geo;
                 filter.last_update = now;
                 return None;
             }
-            // Correlated 2nd point! Initialize velocity vector with physical speed clamp (max 260 m/s = 505 kts)
+
+            let dist = ecef_distance(&filter.pos_ecef, &sol_ecef);
+            let max_phys = 340.0 * dt + 500.0;
+            if dist > max_phys {
+                // Inconsistent with 1st hit, do not confirm, restart candidate
+                filter.pos_ecef = sol_ecef;
+                filter.geo = sol_geo;
+                filter.last_update = now;
+                return None;
+            }
+
+            // Successfully correlated 2nd fix!
             let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
             let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
             let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
-            let init_v_mag = (raw_vx * raw_vx + raw_vy * raw_vy + raw_vz * raw_vz).sqrt();
-            let (init_vx, init_vy, init_vz) = if init_v_mag > 260.0 {
-                let s = 260.0 / init_v_mag;
+            let v_mag = (raw_vx * raw_vx + raw_vy * raw_vy + raw_vz * raw_vz).sqrt();
+            let (init_vx, init_vy, init_vz) = if v_mag > 280.0 {
+                let s = 280.0 / v_mag;
                 (raw_vx * s, raw_vy * s, raw_vz * s)
             } else {
                 (raw_vx, raw_vy, raw_vz)
             };
+
             filter.pos_ecef = sol_ecef;
             filter.vel_ecef = (init_vx, init_vy, init_vz);
             filter.geo = sol_geo;
@@ -370,68 +418,39 @@ impl AircraftTracker {
             filter.last_sbs_emission = now;
             filter.anchor_pos = sol_ecef;
             filter.anchor_time = now;
+
+            entry.last_confirmed_pos = Some((sol_ecef, now));
+            entry.last_confirmed_vel = Some((init_vx, init_vy, init_vz));
+
             return Some((sol_geo, None, None, None));
         }
 
-        // 2. Predict position using current velocity
+        // 4. Predict position using current velocity
         let pred_x = filter.pos_ecef.x + filter.vel_ecef.0 * dt;
         let pred_y = filter.pos_ecef.y + filter.vel_ecef.1 * dt;
         let pred_z = filter.pos_ecef.z + filter.vel_ecef.2 * dt;
         let pred_ecef = EcefPoint::new(pred_x, pred_y, pred_z);
 
-        // Absolute physical speed barrier from last confirmed position
-        // Enforces that an aircraft cannot exceed 280 m/s (544 kts) relative to last confirmed fix.
-        // Completely suppresses hyperbolic mirror jumps and teleports!
-        let dist_from_last = ecef_distance(&filter.pos_ecef, &sol_ecef);
-        let max_phys_jump = (270.0 * dt + 250.0).max(450.0);
-        if dist_from_last > max_phys_jump {
-            filter.consecutive_rejects += 1;
-            return None;
-        }
+        // Distance from predicted position
+        let dist_pred = ecef_distance(&pred_ecef, &sol_ecef);
 
-        // 3-station gate: require clean geometry (GDOP <= 3.2)
+        // 3-station consistency gate:
+        // When receiver_count == 3, MUST be strictly within predicted trajectory
         if receiver_count == 3 {
-            if gdop > 5.2 {
-                return None;
-            }
-        }
-
-        // GDOP gate: reject degenerate collinear geometries
-        let max_g = 5.2;
-        if gdop > max_g {
-            return None;
-        }
-
-        // 3-station consistency gate on established tracks:
-        // A 3-station solve has zero degrees of freedom (unverified clock/collinearity).
-        // If an aircraft has already been established (hits >= 3), require that any 3-station solve
-        // is strictly consistent with the predicted trajectory (within 280m).
-        // This completely prevents clock-drifted 3-station solves from jerking an established 4-station track sideways!
-        if receiver_count == 3 && filter.hits >= 3 {
-            let dist_pred = ecef_distance(&pred_ecef, &sol_ecef);
-            let max_3stn_dev = (180.0 * dt + 250.0).min(650.0);
+            let max_3stn_dev = (160.0 * dt + 200.0).min(500.0);
             if dist_pred > max_3stn_dev {
                 filter.consecutive_rejects += 1;
                 return None;
             }
         }
 
-        // 3. Innovation distance check: realistic bounds to prevent filter starvation
-        let gdop_scale = (gdop / 3.0).clamp(1.0, 1.4);
-        let dist = ecef_distance(&pred_ecef, &sol_ecef);
-        
-        let max_allowed = if receiver_count == 3 {
-            (180.0 * dt + 250.0).max(400.0)
-        } else {
-            (270.0 * dt + 400.0 * gdop_scale).max(650.0)
-        };
-
-        if dist > max_allowed {
+        // General innovation gate for 4+ stations
+        let max_allowed = (270.0 * dt + 350.0).max(500.0);
+        if dist_pred > max_allowed {
             filter.consecutive_rejects += 1;
             
-            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 3,000 meters,
-            // and persisting for 3 consecutive frames. Calculates physical velocity instead of freezing to zero!
-            if receiver_count >= 4 && gdop <= 4.5 && dist < 3_500.0 && filter.consecutive_rejects >= 3 {
+            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 3.5), within 2000m and 3 consecutive rejects
+            if receiver_count >= 4 && gdop <= 3.5 && dist_pred < 2000.0 && filter.consecutive_rejects >= 3 {
                 let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
                 let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
                 let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;
@@ -452,41 +471,28 @@ impl AircraftTracker {
                 filter.hits = 3;
                 filter.anchor_pos = sol_ecef;
                 filter.anchor_time = now;
+                entry.last_confirmed_pos = Some((sol_ecef, now));
+                entry.last_confirmed_vel = Some((init_vx, init_vy, init_vz));
                 return Some((sol_geo, None, None, None));
-            }
-            
-            // If track was completely dark for > 25 seconds, reset state cleanly
-            // ONLY if solution has 4+ receivers, is within physical subsonic distance of last known fix AND has clean GDOP!
-            if dt > 25.0 && receiver_count >= 4 && dist_from_last <= max_phys_jump && gdop <= 4.5 {
-                filter.pos_ecef = sol_ecef;
-                filter.vel_ecef = (0.0, 0.0, 0.0);
-                filter.geo = sol_geo;
-                filter.track_deg = None;
-                filter.speed_kts = None;
-                filter.last_update = now;
-                filter.consecutive_rejects = 0;
-                filter.hits = 1;
-                filter.anchor_pos = sol_ecef;
-                filter.anchor_time = now;
-                return None;
             }
             return None;
         }
+
         filter.consecutive_rejects = 0;
 
-        // 4. GDOP-Adaptive Alpha-Beta Filter update (Smooth trajectory without zigzag)
+        // 5. GDOP-Adaptive Alpha-Beta Filter update (Smooth trajectory without zigzag)
         let rx = sol_ecef.x - pred_x;
         let ry = sol_ecef.y - pred_y;
         let rz = sol_ecef.z - pred_z;
 
         let (base_alpha, base_beta) = if filter.hits < 4 {
-            (0.50, 0.20) // Fast initial acquisition lock
+            (0.50, 0.20)
         } else {
-            (0.25, 0.08) // Cruising: smooth low-pass inertial filtering (Kalman-like, zero jerk)
+            (0.25, 0.08)
         };
 
         let (alpha, beta) = if receiver_count == 3 {
-            (0.10, 0.02) // Very gentle cruise tracking on 3 stations: absorbs inter-station timing jitter
+            (0.10, 0.02) // Very gentle cruise tracking on 3 stations
         } else {
             let gdop_factor = (3.5 / gdop.clamp(1.0, 20.0)).clamp(0.6, 1.2);
             let rms_factor = (12.0 / residual_rms.clamp(4.0, 25.0)).clamp(0.7, 1.2);
@@ -502,7 +508,7 @@ impl AircraftTracker {
         let new_z = pred_z + alpha * rz;
         let new_ecef = EcefPoint::new(new_x, new_y, new_z);
 
-        // Physical acceleration limit: max 4.0 m/s^2 (~0.4g, smooth civil aviation turn rate)
+        // Physical acceleration limit: max 4.0 m/s^2 (~0.4g)
         let max_dv = (4.0 * dt).max(0.2);
         let raw_dv_x = beta * (rx / dt);
         let raw_dv_y = beta * (ry / dt);
@@ -516,19 +522,19 @@ impl AircraftTracker {
         let mut new_vy = filter.vel_ecef.1 + clamped_dv_y;
         let mut new_vz = filter.vel_ecef.2 + clamped_dv_z;
 
-        // Clamp velocity magnitude to max 260 m/s (505 kts)
+        // Clamp velocity magnitude to max 280 m/s (544 kts)
         let v_mag = (new_vx * new_vx + new_vy * new_vy + new_vz * new_vz).sqrt();
-        if v_mag > 260.0 {
-            let scale = 260.0 / v_mag;
+        if v_mag > 280.0 {
+            let scale = 280.0 / v_mag;
             new_vx *= scale;
             new_vy *= scale;
             new_vz *= scale;
         }
 
         let new_geo = ecef2llh(&new_ecef);
-        let (raw_track_deg, speed_kts, v_up_fpm) = ecef_vel_to_track_speed(&new_geo, (new_vx, new_vy, new_vz));
+        let (raw_track_deg, speed_kts, _) = ecef_vel_to_track_speed(&new_geo, (new_vx, new_vy, new_vz));
 
-        // 5. Angular track smoothing: only emit heading when track has accumulated enough hits and speed (>55 kts)
+        // Angular track smoothing: only emit heading when track has accumulated enough hits and speed (>55 kts)
         let mut track_opt = if speed_kts > 55.0 && filter.hits >= 4 {
             if let Some(old_track) = filter.track_deg {
                 let max_turn = (10.0 * dt as f32).max(2.0);
@@ -546,8 +552,7 @@ impl AircraftTracker {
             None
         };
 
-        // Stationary target detection (towers, surface transponders, parked aircraft):
-        // If net displacement over >= 6 seconds is < 40 kts, zero out velocity and suppress speed/track
+        // Stationary target detection:
         let anchor_dt = filter.anchor_time.elapsed().as_secs_f64();
         if anchor_dt >= 6.0 {
             let net_disp = ecef_distance(&filter.anchor_pos, &new_ecef);
@@ -563,7 +568,7 @@ impl AircraftTracker {
             filter.anchor_time = now;
         }
 
-        // 6. SBS emission throttle: emit at most every 900ms to synchronize with readsb/tar1090 1-sec cycles
+        // SBS emission throttle: emit at most every 900ms
         let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(900);
         if should_emit {
             filter.last_sbs_emission = now;
@@ -577,8 +582,9 @@ impl AircraftTracker {
         filter.last_update = now;
         filter.hits += 1;
 
-        // Vertical rate: ONLY emit when derived from genuine barometric altitude change.
-        // Never use 3D TDoA vertical velocity which suffers from ground-station geometric dilution (GDOP).
+        entry.last_confirmed_pos = Some((new_ecef, now));
+        entry.last_confirmed_vel = Some((new_vx, new_vy, new_vz));
+
         let vrate_opt = cached_baro_vrate.map(|baro_fpm| {
             if baro_fpm.abs() < 100.0 {
                 0
