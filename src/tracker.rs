@@ -253,9 +253,9 @@ impl AircraftTracker {
             if receiver_count < 3 {
                 return None;
             }
-            // For 3-station fixes on initial acquisition, require tight GDOP (<= 6.5)
-            // to avoid seeding on a false hyperbolic mirror branch!
-            if receiver_count == 3 && gdop > 6.5 {
+            // For initial track acquisition or re-acquisition after signal drop:
+            // Require tight GDOP (<= 4.5) to avoid seeding on a false hyperbolic mirror branch!
+            if gdop > 4.5 {
                 return None;
             }
 
@@ -322,9 +322,13 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
+            // Correlation fix must also have clean geometry
+            if gdop > 4.5 {
+                return None;
+            }
             let total_dt = filter.anchor_time.elapsed().as_secs_f64();
             let dist_from_anchor = ecef_distance(&filter.anchor_pos, &sol_ecef);
-            let max_phys = (340.0 * total_dt + 600.0).max(1_000.0);
+            let max_phys = (260.0 * total_dt + 400.0).max(800.0);
             if dist_from_anchor > max_phys {
                 // Reject impossible teleportation / hyperbolic mirror jump
                 return None;
@@ -377,13 +381,14 @@ impl AircraftTracker {
             return None;
         }
 
-        // 3-station gate: reject degenerate collinear geometries (GDOP > 3.5)
-        // With only 3 stations (zero mathematical redundancy), loose GDOP causes lateral jumping!
-        if receiver_count == 3 {
-            let max_g = if filter.hits >= 4 { 3.5 } else { 3.0 };
-            if gdop > max_g {
-                return None;
-            }
+        // GDOP gate: reject degenerate collinear geometries
+        let max_g = if receiver_count == 3 {
+            if filter.hits >= 4 { 3.5 } else { 3.0 }
+        } else {
+            5.5
+        };
+        if gdop > max_g {
+            return None;
         }
 
         // 3. Innovation distance check: strict bounds for 3 stations to prevent clock drift from bending the track
@@ -399,9 +404,9 @@ impl AircraftTracker {
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
             
-            // Maneuver recovery: ONLY allowed with 4+ stations, within 1,200 meters,
+            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 1,200 meters,
             // and persisting for 6 consecutive frames. 3-station fixes NEVER trigger maneuver recovery!
-            if receiver_count >= 4 && dist < 1_200.0 && filter.consecutive_rejects >= 6 {
+            if receiver_count >= 4 && gdop <= 4.5 && dist < 1_200.0 && filter.consecutive_rejects >= 6 {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
@@ -416,8 +421,8 @@ impl AircraftTracker {
             }
             
             // If track was completely dark for > 25 seconds, reset state cleanly
-            // ONLY if solution is within physical subsonic distance of last known fix!
-            if dt > 25.0 && dist_from_last <= max_phys_jump {
+            // ONLY if solution is within physical subsonic distance of last known fix AND has clean GDOP!
+            if dt > 25.0 && dist_from_last <= max_phys_jump && gdop <= 4.5 {
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (0.0, 0.0, 0.0);
                 filter.geo = sol_geo;
