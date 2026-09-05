@@ -24,6 +24,7 @@ pub struct TrackFilter {
     pub consecutive_rejects: usize,
     pub anchor_pos: EcefPoint,
     pub anchor_time: Instant,
+    pub is_locked_stationary: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -145,9 +146,6 @@ impl AircraftTracker {
     }
 
     pub fn record_add(&self, icao: u32, user: &Arc<str>) {
-        if self.is_fixed_beacon(icao) {
-            return;
-        }
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
@@ -174,9 +172,6 @@ impl AircraftTracker {
     }
 
     pub fn record_seen(&self, icao: u32, user: &Arc<str>) {
-        if self.is_fixed_beacon(icao) {
-            return;
-        }
         let now = Instant::now();
         {
             let mut entry = self.aircraft.entry(icao).or_insert_with(|| TrackedAircraft::new(icao));
@@ -189,9 +184,6 @@ impl AircraftTracker {
     }
 
     pub fn is_mlat_candidate(&self, icao: u32) -> bool {
-        if self.is_fixed_beacon(icao) {
-            return false;
-        }
         if let Some(ac) = self.aircraft.get(&icao) {
             if let Some(t) = ac.last_adsb_time {
                 if t.elapsed() < Duration::from_secs(60) {
@@ -213,9 +205,6 @@ impl AircraftTracker {
         let mut sync_candidates = Vec::new();
 
         for icao in icaos {
-            if self.is_fixed_beacon(icao) {
-                continue;
-            }
             let seen_count = self.aircraft.get(&icao).map_or(1, |ac| ac.tracking_receivers.len());
             if self.is_mlat_candidate(icao) {
                 // Request MLAT if seen by 2 or more receivers or already tracked
@@ -270,18 +259,20 @@ impl AircraftTracker {
                 return None;
             }
 
+            let is_fixed = self.is_fixed_beacon(icao);
             let filter = TrackFilter {
                 pos_ecef: sol_ecef,
                 vel_ecef: (0.0, 0.0, 0.0),
                 geo: sol_geo,
                 track_deg: None,
-                speed_kts: None,
+                speed_kts: if is_fixed { Some(0.0) } else { None },
                 last_update: now,
                 last_sbs_emission: now,
                 hits: 1, // Pending correlation
                 consecutive_rejects: 0,
                 anchor_pos: sol_ecef,
                 anchor_time: now,
+                is_locked_stationary: is_fixed,
             };
             entry.filter = Some(filter);
             // Require at least 2 correlated observations before painting on map.
@@ -296,6 +287,37 @@ impl AircraftTracker {
         // Avoid duplicate frames
         if dt < 0.08 {
             return None;
+        }
+
+        // Stationary tower / ground beacon anchor:
+        // Permanently locks airport towers and ground radar calibration transponders in place!
+        if filter.is_locked_stationary {
+            let dist_from_anchor = ecef_distance(&filter.anchor_pos, &sol_ecef);
+            if dist_from_anchor > 3500.0 {
+                return None; // Reject severe ground multipath reflection spikes
+            }
+
+            // Gently refine centroid on the first 3 solves, then permanently freeze coordinates
+            if filter.hits < 3 {
+                let count = filter.hits as f64;
+                let new_x = (filter.pos_ecef.x * count + sol_ecef.x) / (count + 1.0);
+                let new_y = (filter.pos_ecef.y * count + sol_ecef.y) / (count + 1.0);
+                let new_z = (filter.pos_ecef.z * count + sol_ecef.z) / (count + 1.0);
+                filter.pos_ecef = EcefPoint::new(new_x, new_y, new_z);
+                filter.geo = ecef2llh(&filter.pos_ecef);
+                filter.anchor_pos = filter.pos_ecef;
+                filter.hits += 1;
+            }
+
+            filter.last_update = now;
+
+            // Emit static coordinate to readsb/tar1090 at most once every 5 seconds (zero speed, no track)
+            if filter.last_sbs_emission.elapsed() >= Duration::from_secs(5) {
+                filter.last_sbs_emission = now;
+                return Some((filter.geo, None, Some(0.0), Some(0)));
+            } else {
+                return None;
+            }
         }
 
         // Track correlation confirmation (hits == 1)
