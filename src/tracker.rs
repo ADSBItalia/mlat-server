@@ -288,21 +288,12 @@ impl AircraftTracker {
             }
         }
 
-        // 2. Strict Station Count Requirement:
-        // A 3-station solve has zero degrees of freedom and two symmetric mirror roots.
-        // It CANNOT initialize or re-acquire a track!
-        let has_confirmed_track = entry.filter.as_ref().map_or(false, |f| {
-            f.hits >= 3 && f.last_update.elapsed() <= Duration::from_secs(30)
-        });
-
-        if receiver_count < 4 && !has_confirmed_track {
-            // Reject 3-station solves on unconfirmed or stale tracks!
-            return None;
-        }
-
-        // Tighter GDOP & RMS thresholds to discard bad geometries
-        let max_gdop = if receiver_count == 3 { 3.8 } else { 4.6 };
-        if gdop > max_gdop || residual_rms > 4.5 {
+        // 2. Station Count & Geometry Quality Gating:
+        // 3-station solves require verified geometry (GDOP <= 5.5, RMS <= 9.0).
+        // 4+ station solves allow wider geometry (GDOP <= 8.5, RMS <= 12.0) to cover maritime/coastal approaches.
+        let max_gdop = if receiver_count == 3 { 5.5 } else { 8.5 };
+        let max_rms = if receiver_count == 3 { 9.0 } else { 12.0 };
+        if gdop > max_gdop || residual_rms > max_rms {
             return None;
         }
 
@@ -313,8 +304,8 @@ impl AircraftTracker {
 
         if !is_active {
             // New track acquisition or re-acquisition after signal drop:
-            // MUST HAVE AT LEAST 4 RECEIVERS!
-            if receiver_count < 4 {
+            // For 3 stations, require clean initial GDOP (<= 4.8)
+            if receiver_count == 3 && gdop > 4.8 {
                 return None;
             }
 
@@ -377,10 +368,7 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits < 2)
         if filter.hits < 2 {
-            if receiver_count < 4 {
-                return None;
-            }
-            if dt > 15.0 {
+            if dt > 20.0 {
                 // Too long since first hit, restart 1st hit
                 filter.pos_ecef = sol_ecef;
                 filter.geo = sol_geo;
@@ -389,7 +377,7 @@ impl AircraftTracker {
             }
 
             let dist = ecef_distance(&filter.pos_ecef, &sol_ecef);
-            let max_phys = 340.0 * dt + 500.0;
+            let max_phys = 340.0 * dt + 800.0;
             if dist > max_phys {
                 // Inconsistent with 1st hit, do not confirm, restart candidate
                 filter.pos_ecef = sol_ecef;
@@ -437,7 +425,7 @@ impl AircraftTracker {
         // 3-station consistency gate:
         // When receiver_count == 3, MUST be strictly within predicted trajectory
         if receiver_count == 3 {
-            let max_3stn_dev = (160.0 * dt + 200.0).min(500.0);
+            let max_3stn_dev = (200.0 * dt + 350.0).min(900.0);
             if dist_pred > max_3stn_dev {
                 filter.consecutive_rejects += 1;
                 return None;
@@ -445,12 +433,13 @@ impl AircraftTracker {
         }
 
         // General innovation gate for 4+ stations
-        let max_allowed = (270.0 * dt + 350.0).max(500.0);
+        let gdop_margin = (gdop * 40.0).clamp(50.0, 450.0);
+        let max_allowed = (280.0 * dt + 400.0 + gdop_margin).max(650.0);
         if dist_pred > max_allowed {
             filter.consecutive_rejects += 1;
             
-            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 3.5), within 2000m and 3 consecutive rejects
-            if receiver_count >= 4 && gdop <= 3.5 && dist_pred < 2000.0 && filter.consecutive_rejects >= 3 {
+            // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.0), within 3000m and 3 consecutive rejects
+            if receiver_count >= 4 && gdop <= 4.0 && dist_pred < 3000.0 && filter.consecutive_rejects >= 3 {
                 let raw_vx = (sol_ecef.x - filter.pos_ecef.x) / dt;
                 let raw_vy = (sol_ecef.y - filter.pos_ecef.y) / dt;
                 let raw_vz = (sol_ecef.z - filter.pos_ecef.z) / dt;

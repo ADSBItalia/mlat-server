@@ -280,12 +280,12 @@ impl ExactSolver {
         };
 
         // 4. GDOP cutoff to eliminate geometrically ambiguous solutions
-        if real_gdop > max_gdop.unwrap_or(4.8) {
+        if real_gdop > max_gdop.unwrap_or(9.5) {
             return None;
         }
 
         // 5. Residual RMS cutoff: reject inconsistent solutions (bad clock/multipath)
-        let max_rms = if has_alt && n >= 4 { 4.5 } else { 3.8 };
+        let max_rms = if has_alt && n >= 4 { 12.0 } else { 9.0 };
         if final_rms > max_rms {
             return None;
         }

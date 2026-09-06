@@ -214,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             measurements = select_optimal_cluster(measurements, &guess);
                         }
 
-                        let max_gdop = 5.2;
+                        let max_gdop = 8.5;
 
                         let sol_opt = state_for_solver.solver.solve(&measurements, alt_m, Some(max_gdop), guess);
                         if icao == 0xAE61FD {
