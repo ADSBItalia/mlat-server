@@ -454,6 +454,13 @@ impl AircraftTracker {
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
             
+            if filter.consecutive_rejects < 5 {
+                filter.pos_ecef = pred_ecef;
+                filter.geo = ecef2llh(&pred_ecef);
+                filter.last_update = now;
+                return Some((filter.geo, filter.track_deg, filter.speed_kts, None));
+            }
+            
             // Maneuver recovery: ONLY allowed with 4+ stations, clean GDOP (<= 4.5), within 3,000 meters,
             // and persisting for 3 consecutive frames. Calculates physical velocity instead of freezing to zero!
             if receiver_count >= 4 && gdop <= 4.5 && dist < 3_500.0 && filter.consecutive_rejects >= 3 {
