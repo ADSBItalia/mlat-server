@@ -50,9 +50,9 @@ impl ExactSolver {
         // 1. Try full measurement set first
         let full_sol = self.solve_raw(measurements, altitude_m, max_gdop, initial_guess);
 
-        // If the full solution is good (RMS <= 8.0m), use it directly without subset pruning
+        // If the full solution is good (RMS <= 8.5m), use it directly without subset pruning
         if let Some(ref sol) = full_sol {
-            if sol.residual_rms <= 8.0 {
+            if sol.residual_rms <= 8.5 {
                 return full_sol;
             }
         }

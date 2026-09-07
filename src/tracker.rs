@@ -195,28 +195,53 @@ impl AircraftTracker {
     }
 
     pub fn get_receiver_candidate_icaos(&self, user: &str) -> Vec<String> {
-        let icaos: Vec<u32> = if let Some(set) = self.receiver_tracking.get(user) {
-            set.iter().copied().collect()
-        } else {
-            Vec::new()
-        };
-
-        let mut mlat_candidates = Vec::new();
+        let mut mlat_candidates = std::collections::HashSet::new();
         let mut sync_candidates = Vec::new();
 
-        for icao in icaos {
-            let seen_count = self.aircraft.get(&icao).map_or(1, |ac| ac.tracking_receivers.len());
-            if self.is_mlat_candidate(icao) {
-                // Request MLAT if seen by 2 or more receivers or already tracked
-                if seen_count >= 2 || self.aircraft.get(&icao).map_or(false, |ac| ac.filter.is_some()) {
-                    mlat_candidates.push(format!("{:06x}", icao));
+        // 1. Candidati rilevati direttamente da questo ricevitore
+        if let Some(set) = self.receiver_tracking.get(user) {
+            for &icao in set.iter() {
+                if self.is_mlat_candidate(icao) {
+                    mlat_candidates.insert(icao);
+                } else if sync_candidates.len() < 16 {
+                    sync_candidates.push(format!("{:06x}", icao));
                 }
-            } else if sync_candidates.len() < 16 {
-                sync_candidates.push(format!("{:06x}", icao));
             }
         }
-        mlat_candidates.extend(sync_candidates);
-        mlat_candidates
+
+        // 2. Estrazione atomica della posizione per evitare lock aperti
+        let my_ecef = self.receiver_positions.get(user).map(|p| p.0);
+
+        if let Some(my_ecef) = my_ecef {
+            // Snapshot dei peer vicini (< 220 km) con capacità estesa
+            let nearby_peers: Vec<String> = self.receiver_positions
+                .iter()
+                .filter(|entry| entry.key().as_str() != user && my_ecef.distance_to(&entry.value().0) <= 220_000.0)
+                .take(24)
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            // Interrogazione sequenziale dei candidati dai peer vicini (cap a 36)
+            for peer in nearby_peers {
+                if mlat_candidates.len() >= 36 {
+                    break;
+                }
+                if let Some(peer_set) = self.receiver_tracking.get(&peer) {
+                    for &cand in peer_set.iter() {
+                        if self.is_mlat_candidate(cand) {
+                            mlat_candidates.insert(cand);
+                            if mlat_candidates.len() >= 36 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut res: Vec<String> = mlat_candidates.into_iter().map(|icao| format!("{:06x}", icao)).collect();
+        res.extend(sync_candidates);
+        res
     }
 
     pub fn has_recent_position(&self, icao: u32, max_age: Duration) -> bool {

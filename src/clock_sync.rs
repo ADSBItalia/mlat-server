@@ -173,10 +173,10 @@ impl ClockPairing {
         }
 
         let abs_error = prediction_error.abs();
-        if abs_error > self.outlier_threshold * 4.0 {
+        if abs_error > self.outlier_threshold * 6.5 {
             self.outlier_total += 1.0;
             self.outliers += 1;
-            if self.outliers >= 3 || (self.update_total > 5.0 && self.outlier_total / self.update_total > 0.80) {
+            if self.outliers >= 6 || (self.update_total > 5.0 && self.outlier_total / self.update_total > 0.85) {
                 self.reset_offsets();
                 self.outliers = 0;
             }
