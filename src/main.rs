@@ -134,6 +134,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Event-driven solver worker (Zero polling overhead)
+    // Background memory pruner (fixes RAM ballooning and keeps footprint ultra-low)
+    let state_for_gc = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let now = std::time::Instant::now();
+            state_for_gc.inflight_frames.retain(|_, (_, _, _, _, inserted_at)| {
+                now.duration_since(*inserted_at) < std::time::Duration::from_millis(3500)
+            });
+            state_for_gc.inflight_syncs.retain(|_, (_, _, inserted_at)| {
+                now.duration_since(*inserted_at) < std::time::Duration::from_millis(3500)
+            });
+        }
+    });
+
     let state_for_solver = state.clone();
     tokio::spawn(async move {
         let mut total_ge3: u64 = 0;
@@ -335,9 +351,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (_, receptions, _, dispatched, created) = entry.value();
                 let age = created.elapsed();
                 if !*dispatched {
-                    if receptions.len() >= 4 && age >= Duration::from_millis(320) {
+                    if receptions.len() >= 4 && age >= Duration::from_millis(120) {
                         ready.push(*entry.key());
-                    } else if receptions.len() >= 3 && age >= Duration::from_millis(600) {
+                    } else if receptions.len() >= 3 && age >= Duration::from_millis(220) {
                         ready.push(*entry.key());
                     }
                 }
@@ -364,7 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
                 if *dispatched {
-                    age < Duration::from_millis(250)
+                    age < Duration::from_millis(1200)
                 } else if receptions.len() < 2 {
                     age < Duration::from_millis(500)
                 } else if receptions.len() == 2 {
@@ -373,9 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     age < Duration::from_millis(900)
                 }
             });
-            state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
-                created.elapsed() < Duration::from_millis(500)
-            });
+            // Sync cleanup rimosso da qui: gestito in modo coerente nel GC di background
         }
     });
 
@@ -466,7 +480,7 @@ async fn handle_receiver_connection(
     // Completely eliminates 500 server-side Zlib2Compressor instances (~128MB C heap saved!).
     let ack_doc = serde_json::json!({
         "compress": "zlib",
-        "reconnect_in": serde_json::Value::Null,
+        "reconnect_in": 0,
         "status": "ok",
         "return_results": return_results_wanted
     });
@@ -712,6 +726,7 @@ fn process_json_message(
                                 user: Arc::clone(user_name),
                                 raw_ts_sec: ts,
                             });
+                            // Dispatch delegato al batch dispatcher per attendere la 4a/5a stazione
                         }
                     }
                 }

@@ -355,7 +355,7 @@ impl AircraftTracker {
 
         // Track correlation confirmation (hits == 1)
         if filter.hits < 2 {
-            let max_conf_gdop = if receiver_count == 3 { 4.8 } else { 5.2 };
+            let max_conf_gdop = 7.5;
             if gdop > max_conf_gdop {
                 return None;
             }
@@ -416,13 +416,13 @@ impl AircraftTracker {
 
         // 3-station gate: require clean geometry (GDOP <= 3.2)
         if receiver_count == 3 {
-            if gdop > 5.2 {
+            if gdop > 5.8 {
                 return None;
             }
         }
 
         // GDOP gate: reject degenerate collinear geometries
-        let max_g = 5.2;
+        let max_g = 5.8;
         if gdop > max_g {
             return None;
         }
@@ -454,7 +454,7 @@ impl AircraftTracker {
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
             
-            if filter.consecutive_rejects < 5 {
+            if filter.consecutive_rejects <= 4 {
                 filter.pos_ecef = pred_ecef;
                 filter.geo = ecef2llh(&pred_ecef);
                 filter.last_update = now;
@@ -474,17 +474,18 @@ impl AircraftTracker {
                 } else {
                     (raw_vx, raw_vy, raw_vz)
                 };
+                let (rec_track, rec_speed, _) = ecef_vel_to_track_speed(&sol_geo, (init_vx, init_vy, init_vz));
                 filter.pos_ecef = sol_ecef;
                 filter.vel_ecef = (init_vx, init_vy, init_vz);
                 filter.geo = sol_geo;
-                filter.track_deg = None;
-                filter.speed_kts = None;
+                filter.track_deg = Some(rec_track);
+                filter.speed_kts = Some(rec_speed);
                 filter.last_update = now;
                 filter.consecutive_rejects = 0;
-                filter.hits = 3;
+                filter.hits = 4;
                 filter.anchor_pos = sol_ecef;
                 filter.anchor_time = now;
-                return Some((sol_geo, None, None, None));
+                return Some((sol_geo, Some(rec_track), Some(rec_speed), None));
             }
             
             // If track was completely dark for > 25 seconds, reset state cleanly
@@ -596,7 +597,7 @@ impl AircraftTracker {
         }
 
         // 6. SBS emission throttle: emit at most every 900ms to synchronize with readsb/tar1090 1-sec cycles
-        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(900);
+        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(250);
         if should_emit {
             filter.last_sbs_emission = now;
         }
@@ -683,7 +684,7 @@ impl AircraftTracker {
     }
 
     pub fn cleanup_stale(&self) {
-        self.aircraft.retain(|_, ac| ac.last_seen.elapsed() < Duration::from_secs(180));
+        self.aircraft.retain(|_, ac| ac.last_seen.elapsed() < Duration::from_secs(60));
         let active_icaos: HashSet<u32> = self.aircraft.iter().map(|kv| *kv.key()).collect();
         for mut set in self.receiver_tracking.iter_mut() {
             set.retain(|icao| active_icaos.contains(icao));

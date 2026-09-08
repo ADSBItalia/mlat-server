@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 const CP_SIZE: usize = 32;
 const DRIFT_N_STABLE: i32 = 12;
-const MAX_PAIRING_AGE_SECS: f64 = 180.0;
+const MAX_PAIRING_AGE_SECS: f64 = 360.0;
 
 #[derive(Debug, Clone)]
 pub struct Clock {
@@ -304,7 +304,7 @@ impl ClockSyncGraph {
     pub fn cleanup_stale(&self) {
         let now = Instant::now();
         self.pairings.retain(|_, pairing| {
-            now.duration_since(pairing.updated) < Duration::from_secs(300)
+            now.duration_since(pairing.updated) < Duration::from_secs(120)
         });
     }
 
