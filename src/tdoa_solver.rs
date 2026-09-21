@@ -30,9 +30,6 @@ impl ExactSolver {
         Self
     }
 
-    /// Solves the TDOA system using Levenberg-Marquardt with RAIM (Receiver Autonomous Integrity Monitoring).
-    /// If all measurements yield high residual or fail, and n >= 4 (with alt) or n >= 5 (without alt),
-    /// it automatically performs Leave-One-Out subset pruning to isolate and eliminate noisy/jittery receivers.
     pub fn solve(
         &self,
         measurements: &[Measurement],
@@ -47,22 +44,14 @@ impl ExactSolver {
             return None;
         }
 
-        // 1. Try full measurement set first
         let full_sol = self.solve_raw(measurements, altitude_m, max_gdop, initial_guess);
 
-        // If the full solution is good (RMS <= 8.5m), use it directly without subset pruning
         if let Some(ref sol) = full_sol {
-            if sol.residual_rms <= 8.5 {
+            if sol.residual_rms <= 3.5 {
                 return full_sol;
             }
         }
 
-        // 2. RAIM Leave-One-Out Fault Exclusion:
-        // Requires genuine redundancy in the remaining subset!
-        // With altitude, 4 variables (x,y,z,dt) require at least 4 stations in the subset
-        // (4 stations + 1 altitude = 5 equations, 1 degree of freedom).
-        // Therefore, Leave-One-Out subset pruning is ONLY mathematically valid when n >= 5 (with alt) or n >= 6 (without alt)!
-        // When n == 4 with altitude, the overdetermined 4-station solution is geometrically stable and must NEVER be pruned to 3!
         let min_subset_size = if has_alt { 4 } else { 5 };
         if n > min_subset_size {
             let mut best_subset_sol: Option<SolverSolution> = None;
@@ -85,7 +74,6 @@ impl ExactSolver {
             }
 
             if let Some(sol) = best_subset_sol {
-                // Prefer pruned subset if full solution failed or if subset improved RMS by >= 35%
                 if full_sol.is_none() || sol.residual_rms < full_sol.as_ref().unwrap().residual_rms * 0.65 {
                     return Some(sol);
                 }
@@ -95,7 +83,6 @@ impl ExactSolver {
         full_sol
     }
 
-    /// Low-level Levenberg-Marquardt nonlinear least-squares solver
     pub fn solve_raw(
         &self,
         measurements: &[Measurement],
@@ -132,7 +119,7 @@ impl ExactSolver {
         let init_off = ecef_distance(&clamped_guess, &pseudorange_data[0].0);
         let mut x_state = DVector::from_vec(vec![clamped_guess.x, clamped_guess.y, clamped_guess.z, init_off]);
         let target_alt = altitude_m.unwrap_or(guess_geo.alt);
-        let alt_err = 75.0; // 250 ft, matches Python MLAT altitude_error for pressure tolerance
+        let alt_err = 75.0;
 
         let mut lambda = 1e-2;
         let mut final_rms = 999.0;
@@ -166,12 +153,10 @@ impl ExactSolver {
                 r[n] = res_alt;
                 cost += res_alt * res_alt;
 
-                let r_earth = 6371000.0;
                 let norm = (cur_pos.x * cur_pos.x + cur_pos.y * cur_pos.y + cur_pos.z * cur_pos.z).sqrt().max(1.0);
-                let f_alt = (norm - r_earth) / norm;
-                j[(n, 0)] = (cur_pos.x * f_alt) / (alt_err * norm);
-                j[(n, 1)] = (cur_pos.y * f_alt) / (alt_err * norm);
-                j[(n, 2)] = (cur_pos.z * f_alt) / (alt_err * norm);
+                j[(n, 0)] = -cur_pos.x / (alt_err * norm);
+                j[(n, 1)] = -cur_pos.y / (alt_err * norm);
+                j[(n, 2)] = -cur_pos.z / (alt_err * norm);
                 j[(n, 3)] = 0.0;
             }
 
@@ -229,12 +214,10 @@ impl ExactSolver {
         let final_pos = EcefPoint::new(x_state[0], x_state[1], x_state[2]);
         let final_off = x_state[3];
 
-        // 1. Physical validation: offset within realistic range
         if final_off < -5_000.0 || final_off > 600_000.0 {
             return None;
         }
 
-        // 2. Radio horizon validation: receiving antennas within 550 km line of sight
         for (rx_pos, _, _) in &pseudorange_data {
             let dist = ecef_distance(&final_pos, rx_pos);
             if dist > 450_000.0 {
@@ -247,7 +230,6 @@ impl ExactSolver {
             return None;
         }
 
-        // 3. Pure geometric GDOP calculation (including altitude constraint when available)
         let m_gdop_rows = if has_alt { n + 1 } else { n };
         let mut h = DMatrix::zeros(m_gdop_rows, 4);
         for (i, (rx_pos, _, _)) in pseudorange_data.iter().enumerate() {
@@ -260,9 +242,9 @@ impl ExactSolver {
 
         if has_alt {
             let norm = (final_pos.x * final_pos.x + final_pos.y * final_pos.y + final_pos.z * final_pos.z).sqrt().max(1.0);
-            h[(n, 0)] = final_pos.x / norm;
-            h[(n, 1)] = final_pos.y / norm;
-            h[(n, 2)] = final_pos.z / norm;
+            h[(n, 0)] = -final_pos.x / norm;
+            h[(n, 1)] = -final_pos.y / norm;
+            h[(n, 2)] = -final_pos.z / norm;
             h[(n, 3)] = 0.0;
         }
 
@@ -279,13 +261,11 @@ impl ExactSolver {
             None => 99.0,
         };
 
-        // 4. GDOP cutoff to eliminate geometrically ambiguous solutions
-        if real_gdop > max_gdop.unwrap_or(12.0) {
+        if real_gdop > max_gdop.unwrap_or(8.0) {
             return None;
         }
 
-        // 5. Residual RMS cutoff: reject inconsistent solutions (bad clock/multipath)
-        if final_rms > 18.0 {
+        if final_rms > 4.5 {
             return None;
         }
 

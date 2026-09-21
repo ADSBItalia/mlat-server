@@ -134,21 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Event-driven solver worker (Zero polling overhead)
-    // Background memory pruner (fixes RAM ballooning and keeps footprint ultra-low)
-    let state_for_gc = state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            let now = std::time::Instant::now();
-            state_for_gc.inflight_frames.retain(|_, (_, _, _, _, inserted_at)| {
-                now.duration_since(*inserted_at) < std::time::Duration::from_millis(3500)
-            });
-            state_for_gc.inflight_syncs.retain(|_, (_, _, inserted_at)| {
-                now.duration_since(*inserted_at) < std::time::Duration::from_millis(3500)
-            });
-        }
-    });
+    // Pruner consolidato attivo a valle
 
     let state_for_solver = state.clone();
     tokio::spawn(async move {
@@ -159,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(msg_hash) = solver_rx.recv().await {
             total_ge3 += 1;
             if let Some((_, (icao, receptions, frame_alt_ft, _, _))) = state_for_solver.inflight_frames.remove(&msg_hash) {
-                if !state_for_solver.tracker.is_mlat_candidate(icao) || receptions.len() < 3 {
+                if !state_for_solver.tracker.is_mlat_candidate(icao) || receptions.len() < 4 {
                     continue;
                 }
 
@@ -200,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .or_else(|| state_for_solver.tracker.get_interpolated_altitude(icao))
                         .map(|ft| (ft as f64) * 0.3048);
 
-                    let min_rcvs = if alt_m.is_some() { 3 } else { 4 };
+                    let min_rcvs = if alt_m.is_some() { 4 } else { 5 };
 
                     if icao == 0xAE61FD {
                         info!("[AE61FD-PRE-SOLVE] meas={} min_rcvs={} alt_m={:?}", measurements.len(), min_rcvs, alt_m);
@@ -350,12 +336,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for entry in state_for_dispatch.inflight_frames.iter() {
                 let (_, receptions, _, dispatched, created) = entry.value();
                 let age = created.elapsed();
-                if !*dispatched {
-                    if receptions.len() >= 4 && age >= Duration::from_millis(120) {
-                        ready.push(*entry.key());
-                    } else if receptions.len() >= 3 && age >= Duration::from_millis(220) {
-                        ready.push(*entry.key());
-                    }
+                if !*dispatched && receptions.len() >= 4 && age >= Duration::from_millis(120) {
+                    ready.push(*entry.key());
                 }
             }
             for h in ready {
@@ -374,22 +356,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Completely eliminates feeder packet starvation over internet jitter while keeping RAM tight!
     let state_for_cleanup = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(80));
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
         loop {
             interval.tick().await;
             state_for_cleanup.inflight_frames.retain(|_, (_, receptions, _, dispatched, created)| {
                 let age = created.elapsed();
                 if *dispatched {
-                    age < Duration::from_millis(1200)
+                    age < Duration::from_millis(300)
                 } else if receptions.len() < 2 {
-                    age < Duration::from_millis(500)
-                } else if receptions.len() == 2 {
-                    age < Duration::from_millis(750)
+                    age < Duration::from_millis(250)
                 } else {
-                    age < Duration::from_millis(900)
+                    age < Duration::from_millis(400)
                 }
             });
-            // Sync cleanup rimosso da qui: gestito in modo coerente nel GC di background
+            state_for_cleanup.inflight_syncs.retain(|_, (_, _, created)| {
+                created.elapsed() < Duration::from_millis(3500)
+            });
         }
     });
 
