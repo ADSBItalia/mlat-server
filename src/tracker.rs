@@ -445,16 +445,20 @@ impl AircraftTracker {
         let gdop_scale = (gdop / 3.0).clamp(1.0, 1.4);
         let dist = ecef_distance(&pred_ecef, &sol_ecef);
         
+        // Dynamic innovation gate: allows normal civil turns at high speed (~400 kts) without snapping
         let max_allowed = if receiver_count == 3 {
-            (180.0 * dt + 250.0).max(400.0)
+            (200.0 * dt + 300.0).max(500.0)
         } else {
-            (270.0 * dt + 400.0 * gdop_scale).max(650.0)
+            (320.0 * dt + 600.0 * gdop_scale).max(950.0)
         };
 
         if dist > max_allowed {
             filter.consecutive_rejects += 1;
-            
-            if filter.consecutive_rejects <= 4 {
+
+            // Immediate turn tracking for 4+ stations with clean GDOP
+            if receiver_count >= 4 && gdop <= 4.5 && dist < 3_500.0 && filter.consecutive_rejects >= 2 {
+                // Skip dead reckoning and let maneuver recovery take over immediately
+            } else if filter.consecutive_rejects <= 2 {
                 filter.pos_ecef = pred_ecef;
                 filter.geo = ecef2llh(&pred_ecef);
                 filter.last_update = now;
