@@ -515,7 +515,7 @@ impl AircraftTracker {
         let (base_alpha, base_beta) = if filter.hits < 4 {
             (0.50, 0.20) // Fast initial acquisition lock
         } else {
-            (0.25, 0.08) // Cruising: smooth low-pass inertial filtering (Kalman-like, zero jerk)
+            (0.12, 0.03) // Cruising: smooth low-pass inertial filtering (Kalman-like, zero jerk)
         };
 
         let (alpha, beta) = if receiver_count == 3 {
@@ -597,7 +597,7 @@ impl AircraftTracker {
         }
 
         // 6. SBS emission throttle: emit at most every 900ms to synchronize with readsb/tar1090 1-sec cycles
-        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(250);
+        let should_emit = filter.last_sbs_emission.elapsed() >= Duration::from_millis(900);
         if should_emit {
             filter.last_sbs_emission = now;
         }
